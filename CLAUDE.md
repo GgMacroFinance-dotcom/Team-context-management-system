@@ -4,7 +4,7 @@ Team Context Management System（TCMS）是一个面向 agent 的团队上下文
 
 ## 先读这些
 
-- `docs/spec.md`：需求、数据模型、接口规格、已定的事、要定的问题、分步实现。改接口先改它，和代码放在同一个 PR。
+- `docs/spec.md`：需求、数据模型、接口规格、已定的事、第一版的细节、分步实现。改接口先改它，和代码放在同一个 PR。
 - `docs/architecture.md`：技术路线。git 里的 Markdown 是真相，PostgreSQL（和 I.P. 共用一个库，schema `tcms`）放提议、令牌和索引，tantivy 做检索；依赖、部署、基准门槛。
 - `reference/README.md`：参考仓库（AFFiNE、BlockSuite、Notion SDK、Notion MCP 服务端等，git 子模块），每个看什么、许可证、读过以后的几点。
 
