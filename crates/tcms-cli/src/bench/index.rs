@@ -1,6 +1,4 @@
-//! `tcms bench`：性能基准（`docs/architecture.md` 第 10 节）。
-//!
-//! `tcms bench index` 在临时目录里造一个上下文仓库，用 TCMS_DATABASE_URL 指的库里一个临时 schema，
+//! `tcms bench index`：在临时目录里造一个上下文仓库，用 TCMS_DATABASE_URL 指的库里一个临时 schema，
 //! 量全量索引、没有变更时的全量、只改一个文件后的增量。跑完删掉临时 schema。
 
 use std::fmt::Write as _;
@@ -8,44 +6,16 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::Subcommand;
 use tcms_core::{ItemId, Kind};
 use tcms_git::{Author, ContextRepo, FileEdit};
 use tcms_store::Store;
 
-#[derive(Subcommand)]
-pub enum What {
-    /// 索引：全量、没有变更、改一个文件后的增量。
-    Index {
-        /// 造多少条。
-        #[arg(long, default_value_t = 10_000)]
-        items: usize,
-        /// 超过门槛时以非零状态退出（CI 用）。门槛按 1 万条定，条数不同时按比例换算。
-        #[arg(long)]
-        check: bool,
-    },
-}
+use super::{ITEMS_PER_FILE, ms, scope_dir, temp_schema};
 
 /// 1 万条全量索引的门槛。
 const FULL_LIMIT_10K: Duration = Duration::from_secs(3);
 /// 改一个文件后增量索引的门槛。
 const INCREMENTAL_LIMIT: Duration = Duration::from_millis(200);
-const ITEMS_PER_FILE: usize = 20;
-
-pub async fn run(what: What) -> Result<ExitCode> {
-    match what {
-        What::Index { items, check } => index(items, check).await,
-    }
-}
-
-fn scope_dir(file: usize) -> String {
-    match file % 4 {
-        0 => "org".to_owned(),
-        1 => format!("team-t{}", file % 5),
-        2 => format!("role-r{}", file % 10),
-        _ => format!("project-p{}", file % 3),
-    }
-}
 
 fn file_text(file: usize, ids: &[ItemId], version: usize) -> String {
     let mut s = format!(
@@ -62,7 +32,7 @@ fn file_text(file: usize, ids: &[ItemId], version: usize) -> String {
     s
 }
 
-async fn index(items: usize, check: bool) -> Result<ExitCode> {
+pub async fn run(items: usize, check: bool) -> Result<ExitCode> {
     let url = crate::database_url()?;
     let files = items.div_ceil(ITEMS_PER_FILE).max(1);
     let dir = tempfile::tempdir()?;
@@ -82,11 +52,7 @@ async fn index(items: usize, check: bool) -> Result<ExitCode> {
     }
     repo.commit(&edits, "基准数据", &author)?;
 
-    let schema = format!(
-        "tcms_bench_{}",
-        ItemId::generate().as_str()[4..].to_lowercase()
-    );
-    let store = Store::connect(&url, &schema)
+    let store = Store::connect(&url, &temp_schema())
         .await
         .context("连接 PostgreSQL")?;
     let result = measure(&repo, &store, &ids, &author).await;
@@ -172,8 +138,4 @@ async fn measure(
         full_noop,
         incremental,
     })
-}
-
-fn ms(d: Duration) -> f64 {
-    d.as_secs_f64() * 1000.0
 }

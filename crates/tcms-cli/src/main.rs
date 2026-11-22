@@ -1,14 +1,15 @@
-//! 命令行 `tcms`。第 1 步只有和上下文仓库、索引有关的命令（`docs/spec.md` 6.2）。
+//! 命令行 `tcms`（`docs/spec.md` 6.2）。现在有上下文仓库、索引和读（`get`、`search`）的命令。
 
 mod bench;
 mod import;
+mod read;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use tcms_core::{Warning, assign_ids, scope_of_path};
+use tcms_core::{Kind, Warning, assign_ids, scope_of_path};
 use tcms_git::{Author, ContextRepo, FileEdit};
 use tcms_store::Store;
 
@@ -47,6 +48,53 @@ enum Command {
         /// 放到仓库里的哪个目录，第一层必须是范围，比如 org、team-research、role-macro/资料。
         #[arg(long)]
         into: String,
+    },
+    /// 编一个上下文包，和 MCP 的 context_get 一样（调试用）。前缀和按任务挑的部分接在一起打印。
+    Get {
+        /// 岗位。
+        #[arg(long)]
+        role: String,
+        /// 团队。不写时从 teams.yaml 查这个岗位属于哪个团队。
+        #[arg(long)]
+        team: Option<String>,
+        /// 这次任务所属的项目。
+        #[arg(long)]
+        project: Option<String>,
+        /// 这次在做什么。
+        #[arg(long)]
+        task: String,
+        /// 整个包的 token 预算（按字符数估）。
+        #[arg(long, default_value_t = 8000)]
+        budget: usize,
+        /// 今天的日期（YYYY-MM-DD），用来判断有没有过复核日期。默认是今天（UTC）。
+        #[arg(long)]
+        today: Option<String>,
+        /// 用 JSON 输出（前缀、按任务挑的部分、放了哪些条目、cursor）。
+        #[arg(long)]
+        json: bool,
+    },
+    /// 全文检索，和 MCP 的 context_search 一样（调试用）。不写 --role 时看全部范围。
+    Search {
+        /// 要找什么。
+        query: String,
+        /// 按这个岗位能看的范围找。
+        #[arg(long)]
+        role: Option<String>,
+        /// 团队。不写时从 teams.yaml 查。
+        #[arg(long, requires = "role")]
+        team: Option<String>,
+        /// 项目。
+        #[arg(long, requires = "role")]
+        project: Option<String>,
+        /// 只找这一类：rule、decision、fact、term、procedure、reference、memory。
+        #[arg(long)]
+        kind: Option<Kind>,
+        /// 最多返回几条（不超过 50）。
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// 用 JSON 输出。
+        #[arg(long)]
+        json: bool,
     },
     /// 性能基准。
     Bench {
@@ -105,6 +153,54 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Import { src, into } => {
             let repo = open_repo(&cli.repo)?;
             import::run(&repo, &src, &into, &author())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Get {
+            role,
+            team,
+            project,
+            task,
+            budget,
+            today,
+            json,
+        } => {
+            let store = connect(&cli.schema).await?;
+            let args = read::GetArgs {
+                who: read::Who {
+                    role,
+                    team,
+                    project,
+                },
+                task,
+                budget,
+                today,
+                json,
+            };
+            read::get(&cli.repo, &store, args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Search {
+            query,
+            role,
+            team,
+            project,
+            kind,
+            limit,
+            json,
+        } => {
+            let store = connect(&cli.schema).await?;
+            let args = read::SearchArgs {
+                query,
+                who: role.map(|role| read::Who {
+                    role,
+                    team,
+                    project,
+                }),
+                kind,
+                limit,
+                json,
+            };
+            read::search(&cli.repo, &store, args).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { what } => bench::run(what).await,

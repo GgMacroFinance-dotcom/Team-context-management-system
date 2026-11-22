@@ -117,6 +117,23 @@ pub struct ChangeRow {
     pub commit_id: String,
 }
 
+/// 某一时刻所有生效（`active`）的条目，和当时的变更序号、索引到的提交。编上下文包用。
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    /// 按 id 排。
+    pub items: Vec<ActiveItem>,
+    /// 当时最大的变更序号，没有变更时是 0。
+    pub cursor: i64,
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveItem {
+    pub row: ItemRow,
+    /// 索引里最后一次改这一条的时间（毫秒）。同分时更新近的排前面。
+    pub updated_ms: i64,
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
@@ -227,6 +244,42 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(item_row).collect())
+    }
+
+    /// 生效条目、变更序号和索引提交，在同一个只读的可重复读事务里取，三样对得上。
+    pub async fn snapshot(&self) -> Result<Snapshot> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .await?;
+        let rows = sqlx::query(concat!(
+            "SELECT id, scope, kind, authority, title, body, tags, owner, review_by::text, supersedes, ",
+            "status, revision, content_hash, path, commit_id, ",
+            "floor(extract(epoch FROM updated_at) * 1000)::int8 ",
+            "FROM items WHERE status = 'active' ORDER BY id"
+        ))
+        .fetch_all(&mut *tx)
+        .await?;
+        let cursor: i64 = sqlx::query("SELECT coalesce(max(seq), 0)::int8 FROM changes")
+            .fetch_one(&mut *tx)
+            .await?
+            .get(0);
+        let commit: Option<String> = sqlx::query("SELECT commit_id FROM index_state")
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| r.get(0));
+        tx.commit().await?;
+        Ok(Snapshot {
+            items: rows
+                .iter()
+                .map(|r| ActiveItem {
+                    row: item_row(r),
+                    updated_ms: r.get(15),
+                })
+                .collect(),
+            cursor,
+            commit,
+        })
     }
 
     /// 序号大于 `after` 的变更，按序号排。

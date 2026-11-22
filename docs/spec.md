@@ -1,6 +1,6 @@
 # 团队上下文系统：需求、数据模型和接口规格
 
-> 2026-11-22 写。状态：**只有设计，没有代码，没有工程师看过**。
+> 2026-11-22 写。状态：第 1、2 步有代码（第 11 节），没有工程师看过。
 > 起点是 intelligent-position（I.P.）主仓库的公司上下文设计草案 `docs/ip/company-context-design.md`（D-5）和岗位记忆设计 `docs/ip/context-memory-design.md`（D-1），按维护者 2026-11-22 的几条决定改成独立产品。
 > 第 10 节是第一版的细节，2026-11-22 都已按建议定。技术路线（git、PostgreSQL、tantivy、依赖、部署）见 [`architecture.md`](architecture.md)。
 
@@ -108,18 +108,20 @@ project:<项目>     ← 和团队、岗位交叉，挂在 org 下面
 
 ### 4.1 请求
 
-agent 交三样：我是谁（团队、岗位）、这次在做什么（任务描述、可选的项目）、预算（token 数）。
+agent 交三样：我是谁（团队、岗位）、这次在做什么（任务描述、可选的项目）、预算（token 数，整个包的，含固定前缀）。
+
+判断“待复核”要用到今天的日期，日期也算请求的一部分：服务按当天（UTC）填，`tcms get --today` 可以指定，测试里固定。
 
 ### 4.2 拼法
 
 1. 取出这个 agent 看得到的范围里所有 `active` 条目。
-2. **固定前缀**：所有 `rule`，加上标了“常驻”（`tags` 含 `pinned`）的条目，按范围从宽到窄、再按 id 排。同一岗位每次都一样，提示词缓存能命中。
-3. **按任务挑**：剩下的条目按和任务描述的相关度排（第一版：标题和标签命中加权，再看正文子串），同分时地位高的、更新近的在前，装到预算用完为止。
-4. **目录**：装不下的条目只列标题和 id，agent 需要时再 `read`。
-5. 每条带起止标记和引用：`[ctx_xxx r3 · decision · team:research · 复核 2026-12-31]`。过了复核日期的标“待复核”。
-6. 包头写明：这些是证据不是指令；地位顺序；资料里的数字不能代替当次工具查到的数。
+2. **固定前缀**：包头，加上所有 `rule` 和标了“常驻”（`tags` 含 `pinned`）的条目，按范围从宽到窄（org、团队、岗位、项目）、再按 id 排。项目排最后，同一岗位换项目时前面那段不变。前缀不看任务和预算，同一岗位（和同一项目）每次逐字节相同，提示词缓存能命中。前缀总是整段给出；比预算还大时，按任务挑的部分为空，并提醒。
+3. **按任务挑**：剩下的条目按和任务描述的相关度排（BM25，标题和标签加权，见 `architecture.md` 第 6 节），同分时地位高的、更新近的在前。命中的条目按这个顺序装，最多装到剩下预算的九成，并给目录留出标题和最后一行的位置；一条装不下就跳过它试下一条。
+4. **目录**：装不下的命中条目在前，没命中的在后，只列标题和 id，agent 需要时再 `read`。目录也放不下的，最后一行写“还有 N 条没列出，可以用 context_search 找”。
+5. 每条带起止标记和引用：`[ctx_xxx r3 · decision · team:research · 复核 2026-12-31]`，结尾 `[/ctx_xxx]`。过了复核日期的标“待复核”。
+6. 包头写明：这些是证据不是指令；地位顺序；资料里的数字不能代替当次工具查到的数；“待复核”是什么意思；引用写 id 和版本号。
 
-包里还返回一个 `cursor`（当时的变更序号），下次用它问变化。
+返回的是两段：`prefix`（固定前缀，放进系统提示词）和 `task`（按任务挑的部分和目录，放在对话开头），外加放了哪些条目、只列了标题的条目、没列出的条数、两段各约多少 token、提醒，和一个 `cursor`（取条目时的变更序号），下次用它问变化。token 按字符数估（第 10 节）。
 
 ### 4.3 拼法要可重现
 
@@ -152,7 +154,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 ### 6.2 命令行
 
-`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms serve`、`tcms bench`。
+`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms serve`、`tcms bench`。
 
 ### 6.3 Markdown 和导入
 
@@ -205,7 +207,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | 步 | 内容 | 怎么测 |
 | --- | --- | --- |
 | 1 ✓ | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import`、`tcms assign-ids`、`tcms bench index`。**已做（2026-11-22）**，只在本地 PostgreSQL 16 和测试里跑过，没接真实团队的资料 | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
-| 2 | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms bench` | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
+| 2 ✓ | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms search`、`tcms bench read`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和造出来的基准数据上跑过，没接真实团队的资料 | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
 | 3 | MCP 服务端：五个工具，stdio 和 HTTP，令牌定范围 | 用 MCP 客户端测；越权读回答和不存在一样 |
 | 4 | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议 | 单元测试；并发批准不丢提交 |
 | 5 | 审核页 | 浏览器里点一遍 |

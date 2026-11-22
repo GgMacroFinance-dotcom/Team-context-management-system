@@ -14,6 +14,8 @@ tcms-core = { path = "crates/tcms-core" }
 tcms-git = { path = "crates/tcms-git" }
 tcms-store = { path = "crates/tcms-store" }
 tcms-index = { path = "crates/tcms-index" }
+tcms-search = { path = "crates/tcms-search" }
+tcms-pack = { path = "crates/tcms-pack" }
 
 anyhow = "1"
 thiserror = "2"
@@ -25,6 +27,7 @@ ulid = "3"
 comrak = { version = "1", default-features = false }
 gix = { version = "0.90", default-features = false }
 sqlx = { version = "0.9", default-features = false }
+tantivy = { version = "0.27", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"

@@ -6,7 +6,7 @@
 
 ## 现在能做什么
 
-第 1 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引。上下文包、检索、MCP 服务端还没有。
+第 1、2 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）。MCP 服务端、提议、审核页还没有。
 
 ```sh
 cargo build --release
@@ -17,7 +17,11 @@ tcms import ~/Downloads/notion-export --into team-research    # 导入一个 Mar
 tcms assign-ids                                               # 给人新写的、还没有 id 的条目补 id
 tcms reindex                                                  # 把 HEAD 同步进索引（只解析改过的文件）
 tcms reindex --full                                           # 解析所有文件；版本号保留
+tcms get --role macro --task "写这周的 CPI 周报"             # 编一个上下文包（团队从 teams.yaml 查），打印出来
+tcms get --role macro --project q4-report --task "..." --budget 4000 --json
+tcms search "周报 口径" --role macro                          # 按这个岗位能看的范围检索；不写 --role 看全部
 tcms bench index --check                                      # 索引基准
+tcms bench read --check                                       # 读的基准：编包、检索
 ```
 
 表放在 schema `tcms` 里（`--schema` 或 `TCMS_SCHEMA` 可改），第一次连接时自动建表。

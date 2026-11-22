@@ -43,4 +43,7 @@ jobs:
       - name: test
         run: cargo test --locked
       - name: bench
-        run: cargo run --release --locked -p tcms-cli -- bench index --check
+        run: |
+          cargo build --release --locked -p tcms-cli
+          ./target/release/tcms bench index --check
+          ./target/release/tcms bench read --check
