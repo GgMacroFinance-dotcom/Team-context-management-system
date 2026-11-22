@@ -1,0 +1,19 @@
+[package]
+name = "tcms-core"
+description = "条目模型和上下文仓库的文件格式"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+comrak.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+ulid.workspace = true

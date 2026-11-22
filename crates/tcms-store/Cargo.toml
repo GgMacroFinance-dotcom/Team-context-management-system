@@ -1,0 +1,17 @@
+[package]
+name = "tcms-store"
+description = "PostgreSQL 里的条目索引、版本和变更序号（schema tcms）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki", "migrate", "macros", "json"] }
+thiserror.workspace = true
+tokio.workspace = true

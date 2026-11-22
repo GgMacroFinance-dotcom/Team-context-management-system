@@ -1,0 +1,21 @@
+[package]
+name = "tcms-index"
+description = "索引器：把上下文仓库里的条目同步到 PostgreSQL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+tcms-core.workspace = true
+tcms-git.workspace = true
+tcms-store.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

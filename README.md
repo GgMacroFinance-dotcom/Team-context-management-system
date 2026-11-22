@@ -2,6 +2,34 @@
 
 面向 agent 的团队上下文系统：把一个团队的规则、决定、术语、流程和资料存成可引用的条目，按岗位和任务编译成上下文包交给 agent，agent 的新发现以提议的形式回来，由人批准。
 
-状态：只有设计，还没有代码。需求和接口见 `docs/spec.md`，技术路线见 `docs/architecture.md`。
+需求和接口见 `docs/spec.md`，技术路线见 `docs/architecture.md`。
+
+## 现在能做什么
+
+第 1 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引。上下文包、检索、MCP 服务端还没有。
+
+```sh
+cargo build --release
+export TCMS_DATABASE_URL=postgres://用户:密码@localhost/库名   # 只从环境变量读
+export TCMS_REPO=/path/to/context                              # 上下文仓库，默认当前目录
+
+tcms import ~/Downloads/notion-export --into team-research    # 导入一个 Markdown 目录，补好 id，做成一个提交
+tcms assign-ids                                               # 给人新写的、还没有 id 的条目补 id
+tcms reindex                                                  # 把 HEAD 同步进索引（只解析改过的文件）
+tcms reindex --full                                           # 解析所有文件；版本号保留
+tcms bench index --check                                      # 索引基准
+```
+
+表放在 schema `tcms` 里（`--schema` 或 `TCMS_SCHEMA` 可改），第一次连接时自动建表。
+
+## 开发
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets --locked -- -D warnings
+TCMS_TEST_DATABASE_URL=postgres://... cargo test --locked   # 不设时跳过连数据库的测试（CI 里必须设）
+```
+
+参考仓库在 `reference/`（git 子模块，只看设计），见 `reference/README.md`。
 
 许可证：MIT。
