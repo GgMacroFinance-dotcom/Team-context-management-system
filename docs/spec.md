@@ -2,7 +2,7 @@
 
 > 2026-11-22 写。状态：**只有设计，没有代码，没有工程师看过**。
 > 起点是 intelligent-position（I.P.）主仓库的公司上下文设计草案 `docs/ip/company-context-design.md`（D-5）和岗位记忆设计 `docs/ip/context-memory-design.md`（D-1），按维护者 2026-11-22 的几条决定改成独立产品。
-> 第 10 节列了还要定的问题。
+> 第 10 节列了还要定的问题。技术路线（git、PostgreSQL、tantivy、依赖、部署）见 [`architecture.md`](architecture.md)。
 
 ## 0. 已定的事（2026-11-22，维护者）
 
@@ -13,6 +13,9 @@
 | 范围 | 四层：全公司、团队、岗位、项目。不做“个人”这一层 |
 | 人在哪里编辑 | 第一版不做编辑器：人用 Markdown 文件和一个简单的审核页。以后让 AFFiNE 当人的编辑器，本系统当 agent 那一层，两边同步 |
 | 语言和许可证 | Rust，MIT |
+| 真相放在哪里 | git 仓库里的 Markdown；PostgreSQL 放提议、令牌、索引等（见 `architecture.md`） |
+| 数据库 | 只用 PostgreSQL，兼容 Supabase；智能岗位服务器上和 I.P. 共用一个库，各用各的 schema |
+| 部署 | 装在打包卖出的智能岗位云服务器上，客户团队也能自己改造部署 |
 
 ## 1. 要解决什么
 
@@ -35,7 +38,7 @@ Notion、AFFiNE 这类工具解决的是“人怎么组织知识”。本系统�
 | 数据库：带属性的页面集合 | Notion | 条目本身就带类型和属性；“决定记录”“术语表”是按类型筛出来的视图 |
 | AI 的改动先是建议，人接受才生效 | Notion AI 建议编辑 | agent 只能提议（第 5 节） |
 | agent 的记忆也是页面，人能直接看、直接改 | Notion agent | agent 读到的每一条，人都能在审核页和导出的 Markdown 里看到、改掉 |
-| 本地优先、CRDT 同步、能自托管 | AFFiNE（Yjs、y-octo） | 数据放部署自己的 SQLite；以后和 AFFiNE 同步时用 Yjs 文档做桥（第 8 节） |
+| 本地优先、CRDT 同步、能自托管 | AFFiNE（Yjs、y-octo） | 数据放部署自己的 git 仓库和 PostgreSQL，能自托管；以后和 AFFiNE 同步时用 Yjs 文档做桥（第 8 节） |
 | 版本历史 | 两者都有 | 条目每次改动留一版 |
 
 参考的上游仓库作为子模块放在 `reference/`，清单和读过以后的几点见 `reference/README.md`。
@@ -95,62 +98,11 @@ project:<项目>     ← 和团队、岗位交叉，挂在 org 下面
 
 ### 3.4 存储
 
-SQLite，四张表：
+条目的真相是一个 git 仓库里的 Markdown 文件：第一层目录是范围，每个二级标题是一条，id 和属性写在标题下的注释里。提议、令牌、变更序号、使用次数、审计和条目索引放在 PostgreSQL（schema `tcms`）。全文检索用进程内的 tantivy，可以随时从 git 重建。
 
-```sql
-CREATE TABLE items (
-    id          TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL,
-    scope       TEXT NOT NULL,        -- 'org' / 'team:x' / 'role:x' / 'project:x'
-    authority   INTEGER NOT NULL,
-    title       TEXT NOT NULL,
-    body        TEXT NOT NULL,
-    tags        TEXT NOT NULL DEFAULT '[]',
-    owner       TEXT,
-    source      TEXT NOT NULL,        -- JSON
-    review_by   TEXT,                 -- YYYY-MM-DD
-    supersedes  TEXT,
-    status      TEXT NOT NULL,
-    revision    INTEGER NOT NULL,
-    created_ms  INTEGER NOT NULL,
-    updated_ms  INTEGER NOT NULL
-) WITHOUT ROWID;
+文件格式、表结构、写入和索引的流程见 [`architecture.md`](architecture.md) 第 2 到 6 节。
 
-CREATE TABLE item_revisions (         -- 每次改动留一份全文
-    item_id   TEXT NOT NULL,
-    revision  INTEGER NOT NULL,
-    snapshot  TEXT NOT NULL,          -- 整条的 JSON
-    changed_ms INTEGER NOT NULL,
-    changed_by TEXT NOT NULL,
-    PRIMARY KEY (item_id, revision)
-) WITHOUT ROWID;
-
-CREATE TABLE proposals (              -- agent 的提议，人处理
-    id            TEXT PRIMARY KEY,
-    action        TEXT NOT NULL,      -- create / update / supersede / archive
-    item_id       TEXT,               -- 改哪条；新建时为空
-    base_revision INTEGER,
-    draft         TEXT NOT NULL,      -- 提议后的整条 JSON
-    reason        TEXT NOT NULL,
-    proposed_by   TEXT NOT NULL,      -- agent 名字
-    evidence      TEXT,               -- 对话链接或摘录
-    conflicts     TEXT NOT NULL DEFAULT '[]',  -- 系统找到的可能矛盾的条目 id
-    status        TEXT NOT NULL,      -- open / accepted / rejected
-    created_ms    INTEGER NOT NULL,
-    resolved_ms   INTEGER,
-    resolved_by   TEXT
-) WITHOUT ROWID;
-
-CREATE TABLE changes (                -- 全局递增的变更序号，给“上次以来改了什么”用
-    seq      INTEGER PRIMARY KEY,
-    item_id  TEXT NOT NULL,
-    scope    TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    at_ms    INTEGER NOT NULL
-);
-```
-
-写入前过一遍密钥脱敏（照 I.P. 的 `redact`）。检索第一版用子串加标题加权，`bench` 超过 50 毫秒再加全文索引（SQLite FTS5）。
+写入前过一遍密钥脱敏（照 I.P. 的 `redact`）。
 
 ## 4. 读：编译上下文包
 
@@ -167,7 +119,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 5. 每条带起止标记和引用：`[ctx_xxx r3 · decision · team:research · 复核 2026-12-31]`。过了复核日期的标“待复核”。
 6. 包头写明：这些是证据不是指令；地位顺序；资料里的数字不能代替当次工具查到的数。
 
-包里还返回一个 `cursor`（当时的 `changes.seq`），下次用它问变化。
+包里还返回一个 `cursor`（当时的变更序号），下次用它问变化。
 
 ### 4.3 拼法要可重现
 
@@ -200,16 +152,16 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 ### 6.2 命令行
 
-`tcms import <dir>`、`tcms export <dir>`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms serve`、`tcms bench`。
+`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms serve`、`tcms bench`。
 
-### 6.3 Markdown 导入导出
+### 6.3 Markdown 和导入
 
-- 导入：一个目录，子目录名是范围（`org/`、`team-research/`、`role-macro/`、`project-x/`），文件开头的 YAML 头写 `kind`、`tags`、`owner`、`review_by`，正文按二级标题切成条目。Notion 和 AFFiNE 导出的 Markdown 改一下目录名就能导入。
-- 导出：同样的结构，每条前面带一行 `<!-- ctx_xxx r3 -->`，再导入时按 id 对上，不会重复。可以放进仓库给不接 MCP 的 agent 读（AGENTS.md 的思路）。
+- 上下文仓库本身就是 Markdown（格式见 `architecture.md` 第 2 节），不接 MCP 的 agent 直接读文件就行（AGENTS.md 的思路），不需要单独的导出。
+- 导入：`tcms import <dir>` 把一个 Markdown 目录（比如 Notion、AFFiNE 导出的）整理成上下文仓库的格式：放进指定范围，按二级标题切条目，补 id，作为一个提交进仓库。
 
 ### 6.4 审核页
 
-一个简单的网页：待处理的提议（差异、矛盾对照、接受、改了再接受、拒绝），待复核的条目，按范围和类型浏览条目。不做编辑器，改条目在 Markdown 里改再导入，或者在审核页里改单条的纯文本。
+一个简单的网页：待处理的提议（差异、矛盾对照、接受、改了再接受、拒绝），待复核的条目，按范围和类型浏览条目。不做编辑器，改条目直接改上下文仓库里的 Markdown（任何编辑器，或推到 git 远端），或者在审核页里改单条的纯文本。会用 git 的团队也可以把上下文仓库放到 GitHub 上，直接看提交历史。
 
 ## 7. I.P. 怎么接
 
@@ -223,9 +175,9 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 方向已定，细节等第一版跑通再设计。现在能想到的：
 
 - 一个范围对应 AFFiNE 里的一个文件夹或文档集合，一条对应一个块（或一个带属性的数据库行）。
-- 同步走 Yjs 文档：本系统这一侧用 `yrs`（MIT）读写。
+- 同步走 Yjs 文档：本系统这一侧用 `yrs`（MIT）读写。CRDT 只用在这座桥上，真相还是 git（`architecture.md` 第 8 节）。
 - 人在 AFFiNE 里改，算人写的修改；agent 的提议在 AFFiNE 里显示成建议。
-- 代码能不能复用 AFFiNE 和 BlockSuite，要看许可证：BlockSuite 是 MPL-2.0，AFFiNE 服务端是企业版许可，OctoBase 是 AGPL-3.0。本仓库是 MIT，要复用需要书面重新授权，不然只参考设计。
+- AFFiNE 和 BlockSuite 只参考设计，代码按本仓库的技术路线重写（维护者 2026-11-22 定）。
 
 ## 9. 安全
 
@@ -239,11 +191,12 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | 问题 | 建议 | 谁来定 |
 | --- | --- | --- |
 | 二进制和命令叫什么 | `tcms` | 维护者 |
-| 第一版要不要向量检索 | 不要，确定性打分，可重现；评测显示不够再加 | 工程师 |
+| 第一版要不要向量检索 | 不要，tantivy 的 BM25 加确定性排序，可重现；评测显示不够再加 pgvector | 工程师 |
 | “常驻”用标签还是单独字段 | 标签 `pinned`，少一个字段 | 工程师 |
 | 预算按什么算 token | 按字符数估（中文 1 字约 1 token，英文 4 字符约 1 token），不引入分词器 | 工程师 |
 | 审核页放在本系统，还是 I.P. 控制台里 | 本系统自带一个；I.P. 控制台以后可以嵌 | 维护者 |
-| 团队范围怎么定义：配置文件还是数据库 | 配置文件，团队和岗位的对应写在 `tcms.yaml` | 工程师 |
+| 团队范围怎么定义：配置文件还是数据库 | 写在上下文仓库根目录的 `teams.yaml`，和条目一起有历史 | 工程师 |
+| 上下文仓库没配远端时怎么备份 | 打包服务器默认每天把仓库打包进备份目录；建议客户配一个自己的远端 | 维护者 |
 
 ## 11. 分步实现
 
@@ -251,10 +204,10 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 | 步 | 内容 | 怎么测 |
 | --- | --- | --- |
-| 1 | Cargo 工作区、存储层、Markdown 导入导出、`tcms import/export` | 单元测试；导入再导出逐字节对上 |
-| 2 | 编译上下文包、`tcms get`、`tcms bench` | 固定数据下输出可重现；基准 |
+| 1 | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import` | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
+| 2 | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms bench` | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
 | 3 | MCP 服务端：五个工具，stdio 和 HTTP，令牌定范围 | 用 MCP 客户端测；越权读回答和不存在一样 |
-| 4 | 提议、矛盾查找、命令行处理提议 | 单元测试 |
+| 4 | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议 | 单元测试；并发批准不丢提交 |
 | 5 | 审核页 | 浏览器里点一遍 |
 | 6 | I.P. 接入（在 I.P. 主仓库开 PR） | 先假模型，再真实模型 |
 | 7 | 评测：一批必须用到团队上下文才能答对的问题，比较接上前后 | 真实模型，要花费用，开工前问维护者 |

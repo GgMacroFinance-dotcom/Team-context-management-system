@@ -1,0 +1,193 @@
+# 技术路线
+
+> 2026-11-22 写，按维护者当天定的路线。状态：**只有设计，没有代码**。
+> 讲“怎么做”；“做什么”（条目、范围、上下文包、提议、接口）见 [`spec.md`](spec.md)。
+
+## 0. 已定的事（2026-11-22，维护者）
+
+| 事 | 决定 |
+| --- | --- |
+| 真相放在哪里 | 以“git 里的 Markdown”为底（路线 B），拿数据库（路线 A）和 CRDT（路线 C）的长处补它的短处 |
+| 语言 | Rust |
+| 数据库 | 只用 PostgreSQL，不再支持 SQLite。兼容 Supabase，但不整套搬 Supabase |
+| 和 I.P. 的关系 | 智能岗位服务器上，I.P. 和本系统共用同一个 PostgreSQL，各用各的 schema。I.P. 那边的改动在 I.P. 仓库做 |
+| 部署 | 装在打包卖出的智能岗位云服务器上；客户的团队也可以自己改造、换部署方式 |
+| 参考仓库 | `reference/` 里的 AFFiNE、Notion 等只看设计，代码重写 |
+
+## 1. 总体
+
+```text
+              人                              agent（I.P. 员工、Claude Code、Codex……）
+              │ 编辑器 / git push / 审核页            │ MCP（stdio、Streamable HTTP）
+              ▼                                        ▼
+        ┌──────────────────────── tcms 服务（一个 Rust 二进制）────────────────────────┐
+        │  索引器：git 变了 → 解析改动的文件 → 更新索引                                 │
+        │  编译器：身份 + 任务 + 预算 → 上下文包                                        │
+        │  提交队列：人批准的提议 → 改文件 → 提交（唯一的写入方）                        │
+        │  MCP 服务端、HTTP 接口、命令行                                                │
+        └───────┬──────────────────────┬─────────────────────────────┬────────────────┘
+                ▼                      ▼                             ▼
+        上下文仓库（git）        PostgreSQL（schema tcms）        tantivy 索引目录
+        定下来的条目，真相        提议、令牌和范围、变更序号、     全文检索，可随时从
+                                  使用次数、审计、条目索引          git 重建
+```
+
+三样东西各管各的：
+
+| | 放什么 | 坏了怎么办 |
+| --- | --- | --- |
+| 上下文仓库 | 人写的和人批准过的条目。历史、diff、回滚、blame 都靠它 | 它就是真相，要备份（推到客户自己的 git 远端） |
+| PostgreSQL | git 不适合放的：待处理的提议、令牌、使用次数、变更序号、审计；外加从 git 建出来的条目索引 | 提议和审计要备份；条目索引可以从 git 重建 |
+| tantivy | 全文检索索引 | 删掉，`tcms reindex` 重建 |
+
+三条路线的长处各从哪里来：
+
+| 长处 | 来自 | 在这里怎么拿到 |
+| --- | --- | --- |
+| 历史、审核、diff、agent 直接读文件 | B | 上下文仓库 |
+| 并发、权限、查询、高频写入 | A | PostgreSQL：提议先进数据库，不是一条提议一个提交；权限用行级安全 |
+| 实时推送变化 | A | PostgreSQL 的 LISTEN/NOTIFY，转成 MCP 的资源更新通知 |
+| 多端实时协作、和 AFFiNE 同步 | C | 以后在边上用 yrs 做 Markdown 和 Yjs 文档的双向桥（第 8 节）；CRDT 不当真相 |
+
+## 2. 上下文仓库的格式
+
+```text
+context/                    ← 一个普通的 git 仓库
+├── teams.yaml              ← 团队、岗位、项目的定义，岗位属于哪个团队
+├── org/                    ← 全公司
+│   ├── 公司简介.md
+│   └── 风格指南.md
+├── team-research/          ← 团队
+├── role-macro/             ← 岗位
+└── project-q4-report/      ← 项目
+```
+
+- 第一层目录就是范围：`org`、`team-<名字>`、`role-<名字>`、`project-<名字>`。
+- 文件开头的 YAML 写这个文件里条目的默认值：`kind`、`tags`、`owner`、`review_by`。
+- 每个二级标题（`## `）是一条。标题下面第一行是一个注释，写 id 和这一条自己的属性：
+
+  ```markdown
+  ## 大客户周报用什么格式
+  <!-- ctx id=ctx_01JDX4M6Q8 kind=procedure review_by=2027-03-31 -->
+
+  正文……
+  ```
+
+- 人新写的标题没有 id，索引器发现后分配一个，由服务提交一个“补 id”的提交。人改标题不影响 id。
+- 删掉一个标题等于归档那一条。取代用 `supersedes=ctx_xxx`。
+- 版本号（`revision`）由索引器维护：一条的内容哈希变了就加一，同时记下是哪个提交，所以 `context_read(id, revision)` 能取回旧版本。
+
+## 3. 写入
+
+**agent 提议**：`context_propose` → PostgreSQL 的 `proposals` 表，状态 `open`。不动 git。
+
+**人批准**：审核页或 `tcms accept <id>` → 进提交队列 → 服务改文件、提交、推送（配了远端的话）。提交信息带上：
+
+```text
+Proposal: p_01JDX5...
+Proposed-by: macro-researcher-1
+Accepted-by: <审核的人>
+```
+
+**人直接改**：在服务器上改、或者推到远端。服务通过远端的 webhook、定时拉取、或者本地文件监听（notify）发现新提交，拉下来，重建改动部分的索引。
+
+**只有一个写入方**：服务里一个队列，一次只做一个提交。提交前先拉远端；git 合并不了时，这条提议回到“需要人合并”，不强推。
+
+**条目在提议之后被人改过**（`base_revision` 落后）：和 `spec.md` 第 5 节一样，要人看过合并结果再接受。
+
+## 4. 读取
+
+**建索引**：每来一个新提交，用 gix 算出改动的文件，只重新解析这些文件，更新 PostgreSQL 的 `items` 表和 tantivy，每改一条在 `changes` 表记一行（全局递增序号），然后 `NOTIFY tcms_changes`。
+
+**`context_get`**：
+
+1. 从 PostgreSQL 取出调用者可见范围里的 `active` 条目（服务里过滤，数据库行级安全再拦一道）。
+2. 固定前缀照 `spec.md` 4.2 拼。
+3. 剩下的用 tantivy 按任务描述打分，同分按地位、更新时间、id 排。
+4. 输出里带 `cursor`（当时的 `changes` 序号）。
+
+**`context_changes`**：按序号查 `changes` 表，和两个提交之间的 git diff 等价，但能按范围过滤，也不用 agent 懂 git。
+
+**订阅**：MCP 支持资源订阅。agent 订阅 `ctx://changes`，服务收到 `NOTIFY` 后给订阅了相关范围的会话发更新通知。
+
+## 5. PostgreSQL
+
+- **版本**：PostgreSQL 15 及以上，打包服务器上用 17。第一版不要求任何扩展。
+- **和 I.P. 怎么分**（2026-11-22 和 I.P. 改 PostgreSQL 的线程对过）：同一个库 `ip`；本系统用 schema `tcms`、登录角色 `tcms_app`，I.P. 用 schema `ip`、角色 `ip_app`；各自只拥有自己的 schema，对另一边没有任何权限，跨系统只走 MCP，不做跨 schema 的 SQL。打包服务器的 compose 只起一个 `postgres:17` 容器，初始化脚本建两个角色和两个 schema，密码走环境变量。
+- **迁移记录和锁**：`tcms_app` 的 `search_path` 是 `tcms`，sqlx 的迁移记录表落在 `tcms._sqlx_migrations`。sqlx 迁移时的 advisory lock 键按库名算，I.P. 用自己的固定键，避开它。
+- **通知频道**：LISTEN/NOTIFY 的频道是库级的，本系统的频道一律以 `tcms_` 开头（目前只有 `tcms_changes`），I.P. 用 `ip_` 开头。
+- **表**（`spec.md` 3.4 的四张表改成下面这样，条目本身的历史交给 git）：
+
+  | 表 | 内容 |
+  | --- | --- |
+  | `items` | 条目索引：id、范围、类型、地位、标题、正文、属性、状态、版本号、所在文件、最后的提交 |
+  | `item_versions` | 版本号对应的提交和内容哈希 |
+  | `proposals` | 同 `spec.md` 3.4 |
+  | `changes` | 全局递增序号、条目 id、范围、版本号、提交、时间 |
+  | `tokens` | 令牌哈希、身份（agent 名或审核的人）、团队、岗位、能看的范围、过期时间 |
+  | `usage` | 每条被放进上下文包、被 `read` 的次数，按岗位记 |
+  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删） |
+
+- **行级安全**：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。
+- **迁移**：sqlx 的迁移文件，服务启动时自动跑。查询用 sqlx 编译期检查，`.sqlx` 离线数据提交进仓库，没有数据库也能编译。
+- **兼容 Supabase**：只用标准 PostgreSQL，客户把 `DATABASE_URL` 指向 Supabase 就能跑，Supabase Studio 能直接看 `tcms` 的表。不依赖 Supabase 的鉴权、PostgREST、Realtime、Storage。
+- **以后**：语义检索用 pgvector（PostgreSQL 许可证），做成可选，不开就不需要这个扩展。要开时打包镜像换成带 pgvector 的 PostgreSQL 17 镜像。
+
+## 6. 检索
+
+- tantivy，放在服务进程里，索引目录在数据目录下，随时可以从 git 重建。
+- 分词：英文按词、小写；中文按相邻两字（bigram）。I.P. 的 `ip-store` 也是这么做的，当时量过 jieba-rs 要 33 MB 内存、加载 97 毫秒，所以没用。
+- 字段：标题和标签加权，正文；按范围、类型、状态过滤。
+- 打分只用 BM25 加确定性的排序规则，同样的数据和请求，结果逐字节相同。
+
+## 7. 接口和部署
+
+**接口**
+
+- MCP（rmcp）：`spec.md` 6.1 的五个工具；资源 `ctx://item/<id>`、`ctx://changes`。stdio 给同机的 agent，Streamable HTTP 给远程的。
+- HTTP（axum）：给审核页和 I.P. 控制台用的 JSON 接口；`/mcp` 是 MCP 的 HTTP 入口。
+- 鉴权：Bearer 令牌，库里只存哈希。令牌绑定身份，身份决定范围（`spec.md` 6.1）。
+
+**在智能岗位服务器上**
+
+- 一个 PostgreSQL（和 I.P. 共用，见第 5 节），`tcms` 作为 systemd 服务，上下文仓库在 `/var/lib/tcms/context`，可以配一个客户自己的远端（GitHub、Gitea 等）。
+- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。
+
+**客户自己改造部署**
+
+- 数据库换成客户自己的 PostgreSQL 或 Supabase：改 `database_url`。
+- git 远端换成客户自己的：改配置。
+- 用容器跑：官方给一个 Dockerfile 和 compose 示例（PostgreSQL 加 tcms）。
+- 不接 MCP 的 agent：直接读上下文仓库的文件。
+
+## 8. 以后和 AFFiNE 同步
+
+方向已定，等第一版跑通再细化。现在的想法：一个 Markdown 文件对应一个 Yjs 文档，用 yrs 读写。人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成建议。CRDT 只在这座桥上用，真相还是 git。
+
+## 9. 依赖
+
+都和 MIT 兼容（2026-11-22 在 crates.io 查的最新版本和许可证）。
+
+| 用途 | crate | 许可证 |
+| --- | --- | --- |
+| 异步运行时 | tokio | MIT |
+| PostgreSQL | sqlx 0.9 | MIT 或 Apache-2.0 |
+| git | gix 0.90（纯 Rust，不依赖 libgit2） | MIT 或 Apache-2.0 |
+| 全文检索 | tantivy 0.27 | MIT |
+| MCP | rmcp 3.x（I.P. 用的 3.9） | Apache-2.0 |
+| HTTP | axum 0.8 | MIT |
+| Markdown | comrak 1.x | BSD-2-Clause |
+| 文件监听 | notify 9 | CC0-1.0 |
+| 以后：Yjs | yrs 0.28 | MIT |
+
+## 10. 基准
+
+`tcms bench` 要量的，CI 设门槛：
+
+| 量什么 | 初始门槛（跑出第一版后再调） |
+| --- | --- |
+| 编一个 8 千 token 的上下文包（1 万条目） | p95 < 20 毫秒 |
+| `context_search`（1 万条目） | p95 < 10 毫秒 |
+| 一个只改了一个文件的提交，到索引更新完 | < 200 毫秒 |
+| 从头重建 1 万条目的索引 | < 10 秒 |
+| 空闲时内存 | < 50 MB |
