@@ -1,0 +1,48 @@
+[submodule "reference/affine"]
+	path = reference/affine
+	url = https://github.com/toeverything/AFFiNE
+	shallow = true
+[submodule "reference/blocksuite"]
+	path = reference/blocksuite
+	url = https://github.com/toeverything/blocksuite
+	shallow = true
+[submodule "reference/octobase"]
+	path = reference/octobase
+	url = https://github.com/toeverything/OctoBase
+	shallow = true
+[submodule "reference/affine-design"]
+	path = reference/affine-design
+	url = https://github.com/toeverything/design
+	shallow = true
+[submodule "reference/affine-docker"]
+	path = reference/affine-docker
+	url = https://github.com/toeverything/docker
+	shallow = true
+[submodule "reference/affine-workers"]
+	path = reference/affine-workers
+	url = https://github.com/toeverything/affine-workers
+	shallow = true
+[submodule "reference/affine-reader"]
+	path = reference/affine-reader
+	url = https://github.com/toeverything/affine-reader
+	shallow = true
+[submodule "reference/notesuite"]
+	path = reference/notesuite
+	url = https://github.com/toeverything/notesuite
+	shallow = true
+[submodule "reference/collaboration-room"]
+	path = reference/collaboration-room
+	url = https://github.com/toeverything/collaboration-room
+	shallow = true
+[submodule "reference/affine-i18n-resources"]
+	path = reference/affine-i18n-resources
+	url = https://github.com/toeverything/AFFiNE-i18n-resources
+	shallow = true
+[submodule "reference/notion-sdk-js"]
+	path = reference/notion-sdk-js
+	url = https://github.com/makenotion/notion-sdk-js
+	shallow = true
+[submodule "reference/notion-mcp-server"]
+	path = reference/notion-mcp-server
+	url = https://github.com/makenotion/notion-mcp-server
+	shallow = true
