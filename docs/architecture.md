@@ -1,6 +1,6 @@
 # 技术路线
 
-> 2026-11-22 写，按维护者当天定的路线。状态：第 1 步（索引）、第 2 步（检索、上下文包）有代码，后面几步只有设计。
+> 2026-11-22 写，按维护者当天定的路线。状态：第 1 步（索引）、第 2 步（检索、上下文包）、第 3 步（MCP 服务端）有代码，后面几步只有设计。
 > 讲“怎么做”；“做什么”（条目、范围、上下文包、提议、接口）见 [`spec.md`](spec.md)。
 
 ## 0. 已定的事（2026-11-22，维护者）
@@ -105,18 +105,22 @@ Accepted-by: <审核的人>
 
 **建索引**：每来一个新提交，用 gix 算出改动的文件，只重新解析这些文件，更新 PostgreSQL 的 `items` 表和 tantivy，每改一条在 `changes` 表记一行（全局递增序号），然后 `NOTIFY tcms_changes`。
 
-**取一份条目**：在一个只读的可重复读事务里，从 PostgreSQL 取出全部 `active` 条目、当时最大的 `changes` 序号和索引到的提交，三样对得上（`Store::snapshot`）。在这份条目上建 tantivy 索引（第 6 节）。服务（第 3 步）常驻这一份，收到 `NOTIFY` 后换新的；`tcms get` 每次现取现建。
+**取一份条目**：在一个只读的可重复读事务里，从 PostgreSQL 取出全部 `active` 条目、当时最大的 `changes` 序号和索引到的提交，三样对得上（`Store::snapshot`）。在这份条目上建 tantivy 索引（第 6 节）。`tcms get` 每次现取现建。
+
+**服务里的那一份**（`crates/tcms-mcp/src/live.rs`）：`tcms serve` 常驻一份条目和检索索引。收到 `NOTIFY tcms_changes`、或者每 30 秒，查一次最大的变更序号，和手上这份不一样就整份重取重建，建好再换上；换的时候请求继续用旧的，不等。通知断了会重新订阅，断线期间漏的由定时检查补上。服务本身不写条目，条目的变化都经过 `tcms reindex`。
+
+取条目和建索引放在一个专门的线程里（自己的单线程 tokio 运行时、自己的一个数据库连接），tantivy 也在这个线程里直接写成一个段，不起它的后台线程。这样每一份条目和索引的内存都从同一处分配，放掉以后下一次重建接着用。一开始放在 tokio 的工作线程和 tantivy 自己的线程里，glibc 每个线程一块内存区，1 万条换 5 次索引物理内存从约 80 MB 涨到约 220 MB，换 7 次约 240 MB，还在涨；改了以后换 5 次约 85 到 96 MB，稳住了（第 10 节）。
 
 **`context_get`**（`crates/tcms-pack`）：
 
-1. 在内存里按调用者可见的范围过滤（第 3 步起数据库行级安全再拦一道）。
+1. 在内存里按调用者可见的范围过滤（数据库行级安全再拦一道，见第 5 节，还没做）。
 2. 固定前缀照 `spec.md` 4.2 拼。
 3. 剩下的用 tantivy 按任务描述打分，同分按地位、更新时间、id 排，装到预算为止，装不下的进目录。
 4. 输出里带 `cursor`（取条目时的 `changes` 序号）。
 
 **`context_changes`**：按序号查 `changes` 表，和两个提交之间的 git diff 等价，但能按范围过滤，也不用 agent 懂 git。
 
-**订阅**：MCP 支持资源订阅。agent 订阅 `ctx://changes`，服务收到 `NOTIFY` 后给订阅了相关范围的会话发更新通知。
+**订阅**：MCP 支持资源订阅。以后 agent 订阅 `ctx://changes`，服务收到 `NOTIFY` 后给订阅了相关范围的会话发更新通知。第 3 步没做：HTTP 那头是无状态的（不发会话 id），agent 用 `context_changes` 按 cursor 问。
 
 ## 5. PostgreSQL
 
@@ -132,11 +136,11 @@ Accepted-by: <审核的人>
   | `item_versions` | 版本号对应的提交和内容哈希 |
   | `proposals` | 同 `spec.md` 3.4 |
   | `changes` | 全局递增序号、条目 id、范围、版本号、提交、时间 |
-  | `tokens` | 令牌哈希、身份（agent 名或审核的人）、团队、岗位、能看的范围、过期时间 |
+  | `tokens` | 令牌 id（`tok_` 加 ULID）、名字、令牌的 SHA-256、岗位、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。第 3 步只有给 agent 的令牌；审核的人的令牌第 5 步加 |
   | `usage` | 每条被放进上下文包、被 `read` 的次数，按岗位记 |
-  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删） |
+  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销 |
 
-- **行级安全**：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。
+- **行级安全**（还没做）：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。第 3 步服务读 `items`、`item_versions`、`changes` 时只在代码里过滤（`context_read`、`context_changes` 按令牌的范围，测试里核对了越权读和不存在回答一样）。
 - **迁移**：sqlx 的迁移文件（`crates/tcms-store/migrations/`），连接时自动跑。第一版用运行时查询（`sqlx::query`），每条 SQL 都由连真 PostgreSQL 的集成测试覆盖；以后表多了再考虑换成编译期检查的 `query!` 宏。批量写入用 `UNNEST`，一条语句写一批。
 - **索引锁**：每次索引在一个事务里，开头拿 `pg_advisory_xact_lock`（键按 schema 名算），并确认库里记的索引提交没被别的进程改过，改过就重来一次。
 - **兼容 Supabase**：只用标准 PostgreSQL，客户把 `DATABASE_URL` 指向 Supabase 就能跑，Supabase Studio 能直接看 `tcms` 的表。不依赖 Supabase 的鉴权、PostgREST、Realtime、Storage。
@@ -146,12 +150,12 @@ Accepted-by: <审核的人>
 
 代码在 `crates/tcms-search`。
 
-- tantivy，放在进程里。**第一版的索引建在内存里，不落盘**（原写“索引目录在数据目录下”）：从 PostgreSQL 取出全部生效条目，单线程按 id 顺序写，写完合成一个段。1 万条建一次约 0.2 到 0.3 秒，多用约 33 MB 内存（第 10 节）。条目多到启动明显变慢时再改成落盘。
+- tantivy，放在进程里。**第一版的索引建在内存里，不落盘**（原写“索引目录在数据目录下”）：从 PostgreSQL 取出全部生效条目，在当前线程里按 id 顺序直接写成一个段（tantivy 的 `single_segment_index_writer`，不起后台线程；这个接口标了 `doc(hidden)`，升级 tantivy 时要看它还在不在）。1 万条建一次约 0.2 到 0.3 秒，多用约 33 MB 内存（第 10 节）。条目多到启动明显变慢时再改成落盘。
 - 分词：英文和数字按词、转小写，超过 64 字节的词跳过；中日韩文字按相邻两字（bigram），一段只有一个字时就是这个字；标点和空白只当分隔。不用词典。I.P. 的 `ip-store` 也是这么做的，当时量过 jieba-rs 要 33 MB 内存、加载 97 毫秒，所以没用。
 - 字段：标题（权重 3）、标签（2）、正文（1），只记词频不记位置。范围、类型的过滤在内存里按条目做，不进 tantivy；索引里只有一个 `ord` 快速字段，指回内存里的条目。
 - 查询：任务描述用同样的规则切词，去重后按出现顺序最多取 256 个；每个词在三个字段上各查一次，分数相加。收集所有命中的文档，不用 tantivy 的 top-k 剪枝，结果和段的布局无关。
 - 排序：BM25 分数乘 1000 取整，分数高的在前，同分按地位、更新时间、id。同样的条目和请求，结果逐字节相同（测试里把条目倒着写进索引、从两个 schema 各建一次，比对输出）。
-- 合成一个段：现在一次建完，段数不影响分数；以后增量更新有删除时，tantivy 在合并前还把删掉的文档算进统计量，合成一个段才和重建的一样。
+- 一个段：现在一次建完，段数不影响分数（测试里用普通的写入器分几次提交造出多个段再合并，和直接写成一个段的结果比对）；以后增量更新有删除时，tantivy 在合并前还把删掉的文档算进统计量，合成一个段才和重建的一样。
 - 词的稀有程度（IDF）按全部条目算，包括调用者看不到的范围。看不到的条目不会出现在结果里，但会轻微影响排序。
 - `context_search` 返回 id、版本、类型、范围、标题和一段摘录：正文里第一个命中词前面留 30 字，一共 120 字，换行换成空格；正文没命中时取开头。
 
@@ -159,14 +163,17 @@ Accepted-by: <审核的人>
 
 **接口**
 
-- MCP（rmcp）：`spec.md` 6.1 的五个工具；资源 `ctx://item/<id>`、`ctx://changes`。stdio 给同机的 agent，Streamable HTTP 给远程的。
-- HTTP（axum）：给审核页和 I.P. 控制台用的 JSON 接口；`/mcp` 是 MCP 的 HTTP 入口。
-- 鉴权：Bearer 令牌，库里只存哈希。令牌绑定身份，身份决定范围（`spec.md` 6.1）。
+- MCP（rmcp，`crates/tcms-mcp`）：`spec.md` 6.1 的工具。第 3 步有 `context_get`、`context_search`、`context_read`、`context_changes`，`context_propose` 第 4 步和提议一起做。资源 `ctx://item/<id>`、`ctx://changes` 还没做。
+  - stdio（`tcms serve --stdio`）给同机、由 agent 启动的进程：令牌从环境变量 `TCMS_TOKEN` 读，启动时核对一次，以后每次调用再核对（吊销马上生效）；标准输出只放协议消息，提示写标准错误。
+  - Streamable HTTP（`tcms serve`，默认 `127.0.0.1:7341`，`/mcp`）给远程的：每个请求带 `Authorization: Bearer <令牌>`，没带或不认时直接回 401，进不了 MCP；不发会话 id，直接回 JSON，不开 SSE。默认只接受 `Host` 是本机的请求（防 DNS 重绑定），对外提供时用 `--allowed-host` 加上域名。`/healthz` 不要令牌。收到 Ctrl-C 或 SIGTERM 时不再接新连接，做完手上的请求再退出。
+  - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
+- HTTP（axum）：以后给审核页和 I.P. 控制台用的 JSON 接口和 `/mcp` 放在同一个服务里（第 5 步）。
+- 鉴权：Bearer 令牌（`tcms_` 加 64 位十六进制，32 字节随机数），库里只存 SHA-256。令牌绑定身份（岗位、团队、能声明的项目），身份决定范围（`spec.md` 6.1）。令牌用 `tcms token add|list|revoke` 管，发和吊销记进 `audit`。
 
 **在智能岗位服务器上**
 
 - 一个 PostgreSQL（和 I.P. 共用，见第 5 节），`tcms` 作为 systemd 服务，上下文仓库在 `/var/lib/tcms/context`，可以配一个客户自己的远端（GitHub、Gitea 等）。
-- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。
+- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。第 3 步还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`）。
 
 **客户自己改造部署**
 
@@ -189,8 +196,9 @@ Accepted-by: <审核的人>
 | PostgreSQL | sqlx 0.9 | MIT 或 Apache-2.0 |
 | git | gix 0.90（纯 Rust，不依赖 libgit2） | MIT 或 Apache-2.0 |
 | 全文检索 | tantivy 0.27（不开默认特性：只用内存索引，不要 mmap、压缩、词干） | MIT |
-| MCP | rmcp 3.x（I.P. 用的 3.9） | Apache-2.0 |
-| HTTP | axum 0.8 | MIT |
+| MCP | rmcp 3.11（I.P. 用的 3.9；不开默认特性，只开服务端、stdio、Streamable HTTP 服务端，基准和测试另开客户端） | Apache-2.0 |
+| HTTP | axum 0.8（只开 http1、tokio） | MIT |
+| 令牌的随机数 | getrandom 0.4 | MIT 或 Apache-2.0 |
 | Markdown | comrak 1.x | BSD-2-Clause |
 | 文件监听 | notify 9 | CC0-1.0 |
 | YAML | serde-saphyr 2（I.P. 也用它） | MIT 或 Apache-2.0 |
@@ -200,7 +208,7 @@ Accepted-by: <审核的人>
 
 | 以后：Yjs | yrs 0.28 | MIT |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有三个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、r-efi（MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 
@@ -217,8 +225,20 @@ Accepted-by: <审核的人>
 | 从头重建 1 万条目的索引（空库） | < 3 秒（原估 10 秒，实测后收紧） | 288 毫秒 |
 | 1 万条目、没有变更的全量索引 | 不设 | 63 毫秒 |
 | 只读 git 和解析 1 万条目 | 不设 | 30 毫秒 |
-| 空闲时内存 | < 50 MB | 第 3 步有服务以后量 |
+| `context_get` 经过 stdio 一次往返（`tcms serve --stdio` 子进程，含核对令牌） | p95 < 30 毫秒 | 中位数 8.0 毫秒，p95 10.0 毫秒 |
+| `context_search` 经过 stdio 一次往返 | p95 < 15 毫秒 | 中位数 0.9 毫秒，p95 1.6 毫秒 |
+| 核对一次令牌（查 PostgreSQL） | p95 < 5 毫秒 | 中位数 0.13 毫秒，p95 0.17 毫秒 |
+| 服务启动（取条目、建索引、握手） | 不设 | 约 0.3 秒 |
+| 加一个文件、`tcms reindex`，到服务里搜得到（整份重建） | < 2 秒 | 约 0.3 到 0.4 秒（其中 reindex 约 25 毫秒） |
+| 服务处理过请求以后的物理内存（1 万条） | 不设 | 约 55 到 61 MB |
+| 换过 5 次索引以后的物理内存（1 万条） | < 160 MB | 约 85 到 96 MB（修之前约 220 MB，还在涨） |
+| 空闲时内存 | < 50 MB | 没达到，见下面 |
 
-`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
+`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项，CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
 
-“空闲时内存 < 50 MB”是给第 3 步的常驻服务定的。按上面量的，1 万条的条目加检索索引已经占了约 33 MB，到时候如果超了，先试着把正文移出内存（只留检索索引，正文按需从 PostgreSQL 取）。
+“空闲时内存 < 50 MB”是给第 3 步的常驻服务定的，**1 万条时没达到**：处理过请求以后约 55 到 61 MB，换过几次索引以后约 76 到 97 MB（重建时新旧两份同时在，放掉以后内存留在进程里给下一次用）。其中约 14 MB 是程序本身映射进来的代码，条目加检索索引约 26 到 33 MB。试过的：
+
+- 改成专门线程之前，换过分配器：mimalloc 换 1 次后约 158 MB；jemalloc 换 5 次约 190 MB，空闲 10 秒后回到约 112 MB。都没解决上涨，没用。
+- glibc 的环境变量 `MALLOC_ARENA_MAX=1`：改成专门线程以后再设，处理过请求后约 51 MB，换 5 次后约 84 MB，只低一点，没有写进默认配置。
+
+下一步要压到 50 MB 以内，按原来的想法把正文移出内存：只留检索索引和标题、属性，正文按需从 PostgreSQL 取（编一个包多一次查询，约 1 毫秒）。单独一个 PR，等第 4 步以后再看要不要做；条目少的团队（几百、几千条）现在就在 50 MB 以内。

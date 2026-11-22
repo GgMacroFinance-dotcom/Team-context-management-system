@@ -1,9 +1,14 @@
 //! tantivy 内存索引。
 //!
-//! 一份 [`Corpus`] 建一个索引，单线程按 id 顺序写，最后合成一个段。BM25 的统计量（文档数、词频、
-//! 字段长度）只由条目决定，所以同样的条目分数一样；合成一个段是为了以后增量更新时把删掉的文档清掉
-//! （tantivy 在合并前还把它们算在统计量里），查询时也少走几个段。分数量化到千分之一后再排序，
+//! 一份 [`Corpus`] 建一个索引：在调用的线程里按 id 顺序直接写成一个段（tantivy 的
+//! `single_segment_index_writer`，不起后台线程）。BM25 的统计量（文档数、词频、字段长度）只由条目决定，
+//! 所以同样的条目分数一样；一个段也是为了以后增量更新时不把删掉的文档算进统计量
+//! （tantivy 在合并前还把它们算在里面），查询时也少走几个段。分数量化到千分之一后再排序，
 //! 同分按地位、更新时间、id 排，结果逐字节可重现。
+//!
+//! 不起后台线程是为了内存：tantivy 的写入线程每次新建，分配落在不同的线程上，常驻服务换几次索引
+//! 物理内存就涨一截（`tcms bench serve` 量过）。这个接口在 tantivy 里标了 `doc(hidden)`，
+//! 升级 tantivy 时要看它还在不在。
 //! 索引不落盘：1 万条在内存里建一次只要几百毫秒（`tcms bench read`），从 PostgreSQL 随时能重建。
 
 use std::cmp::Reverse;
@@ -12,10 +17,11 @@ use std::collections::HashSet;
 use serde::Serialize;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
+use tantivy::directory::RamDirectory;
 use tantivy::merge_policy::NoMergePolicy;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{FAST, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions};
-use tantivy::tokenizer::TextAnalyzer;
+use tantivy::tokenizer::{TextAnalyzer, TokenizerManager};
 use tantivy::{
     DocId, Index, IndexReader, IndexWriter, ReloadPolicy, Score, SegmentOrdinal, SegmentReader,
     TantivyDocument, Term,
@@ -93,14 +99,10 @@ impl SearchIndex {
         let title = sb.add_text_field("title", text.clone());
         let tags = sb.add_text_field("tags", text.clone());
         let body = sb.add_text_field("body", text);
-        let index = Index::create_in_ram(sb.build());
-        index
-            .tokenizers()
-            .register(TOKENIZER, TextAnalyzer::from(TcmsTokenizer::default()));
-
-        let mut writer: IndexWriter = index.writer_with_num_threads(1, WRITER_MEMORY)?;
-        writer.set_merge_policy(Box::new(NoMergePolicy));
-        for (i, item) in corpus.items().iter().enumerate() {
+        let tokenizers = TokenizerManager::default();
+        tokenizers.register(TOKENIZER, TextAnalyzer::from(TcmsTokenizer::default()));
+        let builder = Index::builder().schema(sb.build()).tokenizers(tokenizers);
+        let doc = |i: usize, item: &CorpusItem| {
             let mut doc = TantivyDocument::default();
             doc.add_u64(ord, i as u64);
             doc.add_text(title, &item.title);
@@ -108,17 +110,38 @@ impl SearchIndex {
                 doc.add_text(tags, t);
             }
             doc.add_text(body, &item.body);
-            writer.add_document(doc)?;
-            if commit_every.is_some_and(|n| (i + 1) % n == 0) {
-                writer.commit()?;
+            doc
+        };
+        let index = match commit_every {
+            // 平常：在当前线程里直接写成一个段，不起 tantivy 的后台线程。
+            None => {
+                let mut writer =
+                    builder.single_segment_index_writer(RamDirectory::create(), WRITER_MEMORY)?;
+                for (i, item) in corpus.items().iter().enumerate() {
+                    writer.add_document(doc(i, item))?;
+                }
+                writer.finalize()?
             }
-        }
-        writer.commit()?;
-        let segments = index.searchable_segment_ids()?;
-        if segments.len() > 1 {
-            writer.merge(&segments).wait()?;
-        }
-        writer.wait_merging_threads()?;
+            // 测试：用普通的写入器分几次提交，造出多个段，再合成一个。
+            Some(n) => {
+                let index = builder.create_in_ram()?;
+                let mut writer: IndexWriter = index.writer_with_num_threads(1, WRITER_MEMORY)?;
+                writer.set_merge_policy(Box::new(NoMergePolicy));
+                for (i, item) in corpus.items().iter().enumerate() {
+                    writer.add_document(doc(i, item))?;
+                    if (i + 1) % n == 0 {
+                        writer.commit()?;
+                    }
+                }
+                writer.commit()?;
+                let segments = index.searchable_segment_ids()?;
+                if segments.len() > 1 {
+                    writer.merge(&segments).wait()?;
+                }
+                writer.wait_merging_threads()?;
+                index
+            }
+        };
 
         let reader = index
             .reader_builder()

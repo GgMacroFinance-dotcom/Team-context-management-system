@@ -16,10 +16,12 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 serde_json.workspace = true
 tcms-core.workspace = true
 tcms-git.workspace = true
 tcms-index.workspace = true
+tcms-mcp.workspace = true
 tcms-pack.workspace = true
 tcms-search.workspace = true
 tcms-store.workspace = true

@@ -1,6 +1,6 @@
 # 团队上下文系统：需求、数据模型和接口规格
 
-> 2026-11-22 写。状态：第 1、2 步有代码（第 11 节），没有工程师看过。
+> 2026-11-22 写。状态：第 1 到 3 步有代码（第 11 节），没有工程师看过。
 > 起点是 intelligent-position（I.P.）主仓库的公司上下文设计草案 `docs/ip/company-context-design.md`（D-5）和岗位记忆设计 `docs/ip/context-memory-design.md`（D-1），按维护者 2026-11-22 的几条决定改成独立产品。
 > 第 10 节是第一版的细节，2026-11-22 都已按建议定。技术路线（git、PostgreSQL、tantivy、依赖、部署）见 [`architecture.md`](architecture.md)。
 
@@ -151,10 +151,17 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 - 调用者的身份（团队、岗位）在连接时由令牌决定，参数里的 `role` 必须和令牌一致，看不到的条目和不存在的条目回答一样。
 - 传输：stdio 和 Streamable HTTP 两种。
+- 第 3 步（2026-11-23）的细节：
+  - 前四个工具做了，`context_propose` 第 4 步和提议一起做。
+  - 令牌写岗位、团队（可以没有）和能在 `context_get` 里声明的项目（可以是“任何项目”）。`team` 参数可以不写，写了要和令牌一致；声明了令牌不允许的项目，当作这个项目下没有条目，和不存在的项目回答一样，都只多一句提醒。
+  - `context_search`、`context_read`、`context_changes` 看的范围是 `org`、令牌的团队和岗位，加上令牌允许的项目（不用每次声明）。
+  - `context_read` 读旧版本时，按那个版本当时所在的范围判断能不能看；`superseded_by` 只列调用者看得到的。
+  - `context_changes` 多一个 `limit`（默认 200，最多 1000），返回里 `more` 为真时还有，接着问。
+  - 上限：`task` 2 万字，`query` 2 千字，`budget_tokens` 100 到 20 万。
 
 ### 6.2 命令行
 
-`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms serve`、`tcms bench`。
+`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms token add|list|revoke`（给 agent 发令牌，明文只显示一次）、`tcms serve [--stdio]`、`tcms bench`。
 
 ### 6.3 Markdown 和导入
 
@@ -208,8 +215,8 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | --- | --- | --- |
 | 1 ✓ | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import`、`tcms assign-ids`、`tcms bench index`。**已做（2026-11-22）**，只在本地 PostgreSQL 16 和测试里跑过，没接真实团队的资料 | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
 | 2 ✓ | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms search`、`tcms bench read`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和造出来的基准数据上跑过，没接真实团队的资料 | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
-| 3 | MCP 服务端：五个工具，stdio 和 HTTP，令牌定范围 | 用 MCP 客户端测；越权读回答和不存在一样 |
-| 4 | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议 | 单元测试；并发批准不丢提交 |
+| 3 ✓ | MCP 服务端：四个读的工具（`context_propose` 挪到第 4 步），stdio 和 HTTP，令牌定范围；`tcms token`、`tcms serve`、`tcms bench serve`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端）和造出来的基准数据上跑过，没接真实的 agent | 用 MCP 客户端测；越权读回答和不存在一样 |
+| 4 | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议、`context_propose` | 单元测试；并发批准不丢提交 |
 | 5 | 审核页 | 浏览器里点一遍 |
 | 6 | I.P. 接入（在 I.P. 主仓库开 PR） | 先假模型，再真实模型 |
 | 7 | 评测：一批必须用到团队上下文才能答对的问题，比较接上前后 | 真实模型，要花费用，开工前问维护者 |

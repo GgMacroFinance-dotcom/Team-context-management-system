@@ -116,6 +116,8 @@ pub enum Visibility {
     All,
     /// agent：`org`、所在团队、自己的岗位、这次任务声明的项目。
     Scopes(Vec<Scope>),
+    /// 这些范围，加上所有项目。令牌允许声明任何项目时，读单条和问变化用。
+    ScopesAndAllProjects(Vec<Scope>),
 }
 
 impl Visibility {
@@ -145,6 +147,9 @@ impl Visibility {
         match self {
             Visibility::All => true,
             Visibility::Scopes(s) => s.contains(scope),
+            Visibility::ScopesAndAllProjects(s) => {
+                matches!(scope, Scope::Project(_)) || s.contains(scope)
+            }
         }
     }
 }
@@ -167,5 +172,8 @@ mod tests {
         assert!(!v.allows(&Scope::Team("research".into())));
         assert!(Visibility::agent("a b", None, None).is_err());
         assert!(Visibility::All.allows(&Scope::Team("x".into())));
+        let v = Visibility::ScopesAndAllProjects(vec![Scope::Org]);
+        assert!(v.allows(&Scope::Project("any".into())) && v.allows(&Scope::Org));
+        assert!(!v.allows(&Scope::Role("x".into())));
     }
 }

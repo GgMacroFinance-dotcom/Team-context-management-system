@@ -1,0 +1,29 @@
+[package]
+name = "tcms-mcp"
+description = "MCP 服务端：context_get、context_search、context_read、context_changes，stdio 和 Streamable HTTP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+http.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-io", "transport-streamable-http-server"] }
+serde.workspace = true
+serde_json.workspace = true
+tcms-core.workspace = true
+tcms-pack.workspace = true
+tcms-search.workspace = true
+tcms-store.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+tcms-git.workspace = true
+tcms-index.workspace = true
+tempfile.workspace = true

@@ -1,8 +1,10 @@
 //! `tcms bench`：性能基准（`docs/architecture.md` 第 10 节）。都要 TCMS_DATABASE_URL，
 //! 在里面建一个临时 schema，跑完删掉。
 
+mod data;
 mod index;
 mod read;
+mod serve;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -37,6 +39,21 @@ pub enum What {
         #[arg(long)]
         check: bool,
     },
+    /// 服务：起一个真的 `tcms serve --stdio` 子进程，用 MCP 客户端量往返、令牌核对、换上新索引的时间和空闲时的内存。
+    Serve {
+        /// 造多少条。
+        #[arg(long, default_value_t = 10_000)]
+        items: usize,
+        /// context_get、context_search、令牌核对各跑多少次。
+        #[arg(long, default_value_t = 300)]
+        requests: usize,
+        /// 每个包的 token 预算。
+        #[arg(long, default_value_t = 8000)]
+        budget: usize,
+        /// 超过门槛时以非零状态退出（CI 用）。
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 pub async fn run(what: What) -> Result<ExitCode> {
@@ -48,6 +65,12 @@ pub async fn run(what: What) -> Result<ExitCode> {
             budget,
             check,
         } => read::run(items, requests, budget, check).await,
+        What::Serve {
+            items,
+            requests,
+            budget,
+            check,
+        } => serve::run(items, requests, budget, check).await,
     }
 }
 
@@ -72,4 +95,34 @@ fn temp_schema() -> String {
 
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
+}
+
+struct Percentiles {
+    p50: Duration,
+    p95: Duration,
+}
+
+fn percentiles(mut d: Vec<Duration>) -> Percentiles {
+    d.sort();
+    let at = |q: f64| d[((d.len() as f64 * q).ceil() as usize).clamp(1, d.len()) - 1];
+    Percentiles {
+        p50: at(0.5),
+        p95: at(0.95),
+    }
+}
+
+/// 进程占用的物理内存（KB），`None` 是自己。只在 Linux 上有（读 /proc/<pid>/status）。
+fn rss_kb(pid: Option<u32>) -> Option<u64> {
+    let path = match pid {
+        Some(p) => format!("/proc/{p}/status"),
+        None => "/proc/self/status".to_owned(),
+    };
+    let status = std::fs::read_to_string(path).ok()?;
+    status
+        .lines()
+        .find(|l| l.starts_with("VmRSS:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }

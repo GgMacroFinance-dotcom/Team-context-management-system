@@ -1,9 +1,12 @@
-//! 命令行 `tcms`（`docs/spec.md` 6.2）。现在有上下文仓库、索引和读（`get`、`search`）的命令。
+//! 命令行 `tcms`（`docs/spec.md` 6.2）。现在有上下文仓库、索引、读（`get`、`search`）、令牌和 MCP 服务端的命令。
 
 mod bench;
 mod import;
 mod read;
+mod serve;
+mod token;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -95,6 +98,28 @@ enum Command {
         /// 用 JSON 输出。
         #[arg(long)]
         json: bool,
+    },
+    /// 发、列、吊销给 agent 的令牌。
+    Token {
+        #[command(subcommand)]
+        what: token::TokenCmd,
+    },
+    /// 启动 MCP 服务端（context_get、context_search、context_read、context_changes）。
+    /// 默认是 Streamable HTTP；--stdio 时走标准输入输出，令牌从 TCMS_TOKEN 读。
+    Serve {
+        /// 走标准输入输出（给同机、由 agent 启动的进程用）。
+        #[arg(long)]
+        stdio: bool,
+        /// HTTP 监听的地址（--stdio 时不用）。
+        #[arg(long, env = "TCMS_LISTEN", default_value = "127.0.0.1:7341")]
+        listen: SocketAddr,
+        /// HTTP 除了本机以外还接受的 Host（域名、IP，或带端口），可以写多次；环境变量里用逗号隔开。
+        #[arg(
+            long = "allowed-host",
+            env = "TCMS_ALLOWED_HOSTS",
+            value_delimiter = ','
+        )]
+        allowed_hosts: Vec<String>,
     },
     /// 性能基准。
     Bench {
@@ -201,6 +226,28 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 json,
             };
             read::search(&cli.repo, &store, args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Token { what } => {
+            let store = connect(&cli.schema).await?;
+            token::run(&cli.repo, &store, what).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Serve {
+            stdio,
+            listen,
+            allowed_hosts,
+        } => {
+            let store = connect(&cli.schema).await?;
+            serve::run(
+                store,
+                serve::ServeArgs {
+                    stdio,
+                    listen,
+                    allowed_hosts,
+                },
+            )
+            .await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { what } => bench::run(what).await,
