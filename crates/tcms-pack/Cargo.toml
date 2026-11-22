@@ -1,0 +1,22 @@
+[package]
+name = "tcms-pack"
+description = "编译上下文包：身份、任务、预算 → 固定前缀和按任务挑的部分"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+tcms-core.workspace = true
+tcms-search.workspace = true
+
+[dev-dependencies]
+tcms-git.workspace = true
+tcms-index.workspace = true
+tcms-store.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

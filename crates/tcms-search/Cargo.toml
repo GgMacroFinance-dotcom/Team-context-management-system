@@ -1,0 +1,17 @@
+[package]
+name = "tcms-search"
+description = "检索：中文按相邻两字切分，tantivy 内存索引，BM25 加确定性排序"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+tantivy.workspace = true
+tcms-core.workspace = true
+tcms-store.workspace = true
+thiserror.workspace = true
