@@ -1,0 +1,25 @@
+[package]
+name = "tcms-cli"
+description = "命令行 tcms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tcms"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tcms-core.workspace = true
+tcms-git.workspace = true
+tcms-index.workspace = true
+tcms-store.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

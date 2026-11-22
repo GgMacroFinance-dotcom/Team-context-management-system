@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/GgMacroFinance-dotcom/Team-context-management-system"
+
+[workspace.dependencies]
+tcms-core = { path = "crates/tcms-core" }
+tcms-git = { path = "crates/tcms-git" }
+tcms-store = { path = "crates/tcms-store" }
+tcms-index = { path = "crates/tcms-index" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-saphyr = "2"
+sha2 = "0.11"
+ulid = "3"
+comrak = { version = "1", default-features = false }
+gix = { version = "0.90", default-features = false }
+sqlx = { version = "0.9", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

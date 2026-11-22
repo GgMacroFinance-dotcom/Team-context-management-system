@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # 只给这次 CI 用的临时库，不是密钥。
+          POSTGRES_USER: tcms
+          POSTGRES_PASSWORD: tcms
+          POSTGRES_DB: tcms
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tcms"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CARGO_TERM_COLOR: always
+      TCMS_TEST_DATABASE_URL: postgres://tcms:tcms@localhost:5432/tcms
+      TCMS_DATABASE_URL: postgres://tcms:tcms@localhost:5432/tcms
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --locked
+      - name: bench
+        run: cargo run --release --locked -p tcms-cli -- bench index --check

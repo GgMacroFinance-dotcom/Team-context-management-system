@@ -1,0 +1,17 @@
+[package]
+name = "tcms-git"
+description = "上下文仓库的 git 读写（gix）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gix = { workspace = true, features = ["sha1", "index", "status"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

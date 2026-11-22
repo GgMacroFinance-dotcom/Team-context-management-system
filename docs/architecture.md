@@ -73,7 +73,13 @@ context/                    ← 一个普通的 git 仓库
   正文……
   ```
 
-- 人新写的标题没有 id，索引器发现后分配一个，由服务提交一个“补 id”的提交。人改标题不影响 id。
+- 文件里没有二级标题时，整个文件是一条，标题取一级标题，没有一级标题就用文件名。
+- 注释里的值有空格时加双引号：`tags="周报, 客户"`。注释里的属性覆盖文件开头的默认值。都没写 `kind` 的按 `reference`（资料）处理，并提醒。
+- 代码块、引用、列表里的 `## ` 不算标题（用 comrak 解析）。不在任何二级标题下面的内容不进索引，会提醒。
+- 人新写的标题没有 id，`tcms assign-ids` 给它分配一个并做成一个“补 id”的提交（只插入 id，文件其余部分逐字节不变）；以后服务会自动做。没有 id 的条目不进索引，会提醒。人改标题不影响 id。
+- 两个地方用了同一个 id 时，先进索引的那条留着，另一条不进索引，并提醒。
+- `teams.yaml` 里没定义的范围目录照样索引，但会提醒。
+- 解析出问题时只跳过那个文件或那一条，不让整次索引失败。
 - 删掉一个标题等于归档那一条。取代用 `supersedes=ctx_xxx`。
 - 版本号（`revision`）由索引器维护：一条的内容哈希变了就加一，同时记下是哪个提交，所以 `context_read(id, revision)` 能取回旧版本。
 
@@ -129,7 +135,8 @@ Accepted-by: <审核的人>
   | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删） |
 
 - **行级安全**：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。
-- **迁移**：sqlx 的迁移文件，服务启动时自动跑。查询用 sqlx 编译期检查，`.sqlx` 离线数据提交进仓库，没有数据库也能编译。
+- **迁移**：sqlx 的迁移文件（`crates/tcms-store/migrations/`），连接时自动跑。第一版用运行时查询（`sqlx::query`），每条 SQL 都由连真 PostgreSQL 的集成测试覆盖；以后表多了再考虑换成编译期检查的 `query!` 宏。批量写入用 `UNNEST`，一条语句写一批。
+- **索引锁**：每次索引在一个事务里，开头拿 `pg_advisory_xact_lock`（键按 schema 名算），并确认库里记的索引提交没被别的进程改过，改过就重来一次。
 - **兼容 Supabase**：只用标准 PostgreSQL，客户把 `DATABASE_URL` 指向 Supabase 就能跑，Supabase Studio 能直接看 `tcms` 的表。不依赖 Supabase 的鉴权、PostgREST、Realtime、Storage。
 - **以后**：语义检索用 pgvector（PostgreSQL 许可证），做成可选，不开就不需要这个扩展。要开时打包镜像换成带 pgvector 的 PostgreSQL 17 镜像。
 
@@ -178,16 +185,26 @@ Accepted-by: <审核的人>
 | HTTP | axum 0.8 | MIT |
 | Markdown | comrak 1.x | BSD-2-Clause |
 | 文件监听 | notify 9 | CC0-1.0 |
+| YAML | serde-saphyr 2（I.P. 也用它） | MIT 或 Apache-2.0 |
+| 条目 id | ulid 3 | MIT |
+| 内容哈希 | sha2 0.11 | MIT 或 Apache-2.0 |
+| 命令行 | clap 4 | MIT 或 Apache-2.0 |
+
+第 1 步之后整棵依赖树（309 个 crate）都是 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可，没有 GPL、MPL 系的。
 | 以后：Yjs | yrs 0.28 | MIT |
 
 ## 10. 基准
 
 `tcms bench` 要量的，CI 设门槛：
 
-| 量什么 | 初始门槛（跑出第一版后再调） |
-| --- | --- |
-| 编一个 8 千 token 的上下文包（1 万条目） | p95 < 20 毫秒 |
-| `context_search`（1 万条目） | p95 < 10 毫秒 |
-| 一个只改了一个文件的提交，到索引更新完 | < 200 毫秒 |
-| 从头重建 1 万条目的索引 | < 10 秒 |
-| 空闲时内存 | < 50 MB |
+| 量什么 | 门槛 | 实测（2026-11-22，云端开发机 4 核，本地 PostgreSQL 16，release） |
+| --- | --- | --- |
+| 编一个 8 千 token 的上下文包（1 万条目） | p95 < 20 毫秒 | 第 2 步做 |
+| `context_search`（1 万条目） | p95 < 10 毫秒 | 第 2 步做 |
+| 一个只改了一个文件的提交，到索引更新完 | < 200 毫秒 | 17 毫秒 |
+| 从头重建 1 万条目的索引（空库） | < 3 秒（原估 10 秒，实测后收紧） | 288 毫秒 |
+| 1 万条目、没有变更的全量索引 | 不设 | 63 毫秒 |
+| 只读 git 和解析 1 万条目 | 不设 | 30 毫秒 |
+| 空闲时内存 | < 50 MB | 第 3 步有服务以后量 |
+
+`tcms bench index [--items N] [--check]` 量索引这几项，CI 里带 `--check` 跑。

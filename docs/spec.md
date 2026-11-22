@@ -204,7 +204,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 | 步 | 内容 | 怎么测 |
 | --- | --- | --- |
-| 1 | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import` | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
+| 1 ✓ | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import`、`tcms assign-ids`、`tcms bench index`。**已做（2026-11-22）**，只在本地 PostgreSQL 16 和测试里跑过，没接真实团队的资料 | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
 | 2 | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms bench` | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
 | 3 | MCP 服务端：五个工具，stdio 和 HTTP，令牌定范围 | 用 MCP 客户端测；越权读回答和不存在一样 |
 | 4 | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议 | 单元测试；并发批准不丢提交 |
