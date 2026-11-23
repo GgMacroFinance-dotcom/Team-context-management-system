@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>团队上下文审核</title>
+<link rel="stylesheet" href="/review/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">团队上下文 · 审核</div>
+  <nav id="tabs" hidden>
+    <a href="#/proposals" data-tab="proposals">待审核的提议</a>
+    <a href="#/due" data-tab="due">待复核的条目</a>
+    <a href="#/items" data-tab="items">浏览条目</a>
+  </nav>
+  <div class="who" id="who" hidden>
+    <span id="who-name"></span>
+    <button type="button" id="logout" class="link">退出</button>
+  </div>
+</header>
+<main id="main" aria-live="polite"></main>
+<script src="/review/app.js"></script>
+</body>
+</html>

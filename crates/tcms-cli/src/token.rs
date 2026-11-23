@@ -1,4 +1,6 @@
-//! `tcms token`：发、列、吊销给 agent 的令牌（`docs/spec.md` 6.1）。库里只存令牌的哈希，明文只在发的时候打印一次。
+//! `tcms token`：发、列、吊销令牌（`docs/spec.md` 6.1）。库里只存令牌的哈希，明文只在发的时候打印一次。
+//!
+//! 两种令牌：给 agent 的（连 MCP，写岗位、团队、项目），和给审核的人的（`--reviewer`，登录审核页）。两种互不通用。
 
 use std::path::Path;
 
@@ -13,14 +15,14 @@ use crate::read::teams_at;
 
 #[derive(Subcommand)]
 pub enum TokenCmd {
-    /// 发一个令牌。令牌决定调用者的岗位、团队和能声明的项目；明文只打印这一次。
+    /// 发一个令牌。agent 的令牌决定调用者的岗位、团队和能声明的项目；--reviewer 发给审核的人。明文只打印这一次。
     Add {
-        /// 给谁用的，比如“I.P. 宏观研报”。
+        /// 给谁用的，比如“I.P. 宏观研报”；审核的人写人名（记进审计和提交）。
         #[arg(long)]
         name: String,
-        /// 岗位。
-        #[arg(long)]
-        role: String,
+        /// 岗位（agent 的令牌要写）。
+        #[arg(long, required_unless_present = "reviewer")]
+        role: Option<String>,
         /// 团队。不写时从上下文仓库 HEAD 的 teams.yaml 查这个岗位属于哪个团队。
         #[arg(long)]
         team: Option<String>,
@@ -30,6 +32,9 @@ pub enum TokenCmd {
         /// 允许声明任何项目。
         #[arg(long, conflicts_with = "projects")]
         all_projects: bool,
+        /// 发给审核的人：登录审核页，看、批准、拒绝提议，改单条；能处理所有范围，连不了 MCP。
+        #[arg(long, conflicts_with_all = ["role", "team", "projects", "all_projects"])]
+        reviewer: bool,
         /// 多少天后过期（1 到 3650）。不写时不过期。
         #[arg(long, value_parser = clap::value_parser!(i32).range(1..=3650))]
         days: Option<i32>,
@@ -58,9 +63,36 @@ pub async fn run(repo: &Path, store: &Store, cmd: TokenCmd) -> Result<()> {
             team,
             projects,
             all_projects,
+            reviewer,
             days,
             json,
         } => {
+            if reviewer {
+                if name.trim().is_empty() {
+                    bail!("--name 不能是空的");
+                }
+                let (id, secret) = store
+                    .create_reviewer_token(name.trim(), days, &actor())
+                    .await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "id": id, "secret": secret, "kind": "reviewer",
+                            "name": name.trim(), "expires_in_days": days,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "发了审核令牌 {id}：{}，登录审核页（tcms serve 的 /review）用",
+                        name.trim()
+                    );
+                    println!("令牌明文只显示这一次，请交给本人：");
+                    println!("{secret}");
+                }
+                return Ok(());
+            }
+            let role = role.unwrap_or_default();
             let new = resolve(
                 repo,
                 NewToken {
@@ -111,7 +143,10 @@ pub async fn run(repo: &Path, store: &Store, cmd: TokenCmd) -> Result<()> {
                         r.id,
                         status(r),
                         r.name,
-                        describe(&r.role, r.team.as_deref(), &r.projects),
+                        match &r.role {
+                            Some(role) => describe(role, r.team.as_deref(), &r.projects),
+                            None => "审核的人（审核页，所有范围）".to_owned(),
+                        },
                         r.created_at,
                         match &r.expires_at {
                             Some(e) => format!("，{e} 过期"),

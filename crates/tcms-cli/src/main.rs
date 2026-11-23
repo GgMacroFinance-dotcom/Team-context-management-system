@@ -143,13 +143,25 @@ enum Command {
         #[arg(long)]
         note: Option<String>,
     },
-    /// 发、列、吊销给 agent 的令牌。
+    /// 列出待复核的生效条目（复核日期到了的），日期早的在前。
+    ReviewDue {
+        /// 往后多少天以内到期的也列出来。
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..=366))]
+        within: i32,
+        /// 今天的日期（YYYY-MM-DD），默认是今天（UTC）。
+        #[arg(long)]
+        today: Option<String>,
+        /// 用 JSON 输出。
+        #[arg(long)]
+        json: bool,
+    },
+    /// 发、列、吊销令牌（给 agent 的，和给审核的人的）。
     Token {
         #[command(subcommand)]
         what: token::TokenCmd,
     },
-    /// 启动 MCP 服务端（context_get、context_search、context_read、context_changes、context_propose）。
-    /// 默认是 Streamable HTTP；--stdio 时走标准输入输出，令牌从 TCMS_TOKEN 读。
+    /// 启动 MCP 服务端（context_get、context_search、context_read、context_changes、context_propose）和审核页。
+    /// 默认是 Streamable HTTP（/mcp 和 /review）；--stdio 时只有 MCP，走标准输入输出，令牌从 TCMS_TOKEN 读。
     Serve {
         /// 走标准输入输出（给同机、由 agent 启动的进程用）。
         #[arg(long)]
@@ -312,6 +324,52 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             proposals::reject(&store, &id, note.as_deref()).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::ReviewDue {
+            within,
+            today,
+            json,
+        } => {
+            let store = connect(&cli.schema).await?;
+            let today = match today {
+                Some(d) if tcms_core::valid_date(&d) => d,
+                Some(d) => bail!("--today 不是 YYYY-MM-DD：{d}"),
+                None => tcms_core::utc_today(),
+            };
+            let rows = store.items_due(&today, within).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!(
+                    "没有到期要复核的条目（{today}{}）。",
+                    if within > 0 {
+                        format!(" 往后 {within} 天")
+                    } else {
+                        String::new()
+                    }
+                );
+            } else {
+                for r in &rows {
+                    println!(
+                        "{}  {}  {} / {}  {}\n  {}  第 {} 版{}",
+                        r.review_by.as_deref().unwrap_or("-"),
+                        r.id,
+                        r.scope,
+                        r.kind,
+                        r.title,
+                        r.path,
+                        r.revision,
+                        r.owner
+                            .as_deref()
+                            .map(|o| format!("，负责人 {o}"))
+                            .unwrap_or_default()
+                    );
+                }
+                println!(
+                    "看过以后改复核日期：在审核页里改这一条，或者直接改 Markdown 里的 review_by。"
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Token { what } => {
             let store = connect(&cli.schema).await?;
             token::run(&cli.repo, &store, what).await?;
@@ -329,6 +387,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     stdio,
                     listen,
                     allowed_hosts,
+                    repo: cli.repo.clone(),
                 },
             )
             .await?;
