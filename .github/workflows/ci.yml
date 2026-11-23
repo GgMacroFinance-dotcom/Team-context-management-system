@@ -47,3 +47,4 @@ jobs:
           cargo build --release --locked -p tcms-cli
           ./target/release/tcms bench index --check
           ./target/release/tcms bench read --check
+          ./target/release/tcms bench serve --check

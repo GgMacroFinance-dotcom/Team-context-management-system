@@ -7,5 +7,5 @@ pub mod teams;
 pub use format::{
     ParsedFile, ParsedItem, Warning, assign_ids, clean_export_name, parse_file, scope_of_path,
 };
-pub use model::{ItemId, Kind, Scope, Status, valid_date, valid_name};
+pub use model::{ItemId, Kind, Scope, Status, utc_today, valid_date, valid_name};
 pub use teams::{TEAMS_FILE, Teams};

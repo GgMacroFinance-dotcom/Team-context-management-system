@@ -6,7 +6,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 
@@ -27,6 +27,15 @@ macro_rules! select_row {
     };
 }
 
+mod tokens;
+
+pub use sqlx::postgres::PgListener;
+
+pub use tokens::{
+    ALL_PROJECTS, Identity, NewToken, TOKEN_PREFIX, TokenRow, VisibleChange, VisibleChanges,
+    hash_token,
+};
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +46,8 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("schema 名不对：{0}（只能是小写字母、数字、下划线，字母或下划线开头）")]
     BadSchema(String),
+    #[error("生成随机数失败：{0}")]
+    Random(String),
     #[error("索引期间有别的进程先更新了索引（原来在 {expected:?}，现在在 {found:?}），请重试")]
     Conflict {
         expected: Option<String>,
@@ -47,7 +58,7 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// 索引表里一条的完整内容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemRow {
     pub id: String,
     pub scope: String,
@@ -183,6 +194,21 @@ impl Store {
 
     pub fn schema(&self) -> &str {
         &self.schema
+    }
+
+    /// 同一个库、同一个 schema 的另一组连接，最多 `max_connections` 个，不再跑迁移。
+    /// 给在另一个 tokio 运行时里跑的后台任务用：连接绑在建它的那个运行时上，要在那边调用。
+    pub async fn sibling(&self, max_connections: u32) -> Result<Self> {
+        let options = (*self.pool.connect_options()).clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect_with(options)
+            .await?;
+        Ok(Self {
+            pool,
+            schema: self.schema.clone(),
+        })
     }
 
     /// 删掉整个 schema（测试和基准收尾用）。
