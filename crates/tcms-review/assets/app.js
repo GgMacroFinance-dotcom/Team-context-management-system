@@ -80,11 +80,12 @@
   const kindWord = (k) => KIND[k] || k;
   const badge = (text, cls) => h("span", { class: `badge ${cls || ""}` }, text);
   const short = (c) => (c ? c.slice(0, 12) : "");
-  // 配了远端时，批准、保存以后说一句推没推上去。
+  // 配了远端时，批准、保存以后说一句推没推上去；先拉下来的新条目补了 id 时也说一句。
   const remoteNote = (r) => {
     if (!r) return "";
-    if (r.errors && r.errors.length) return `；没推到远端（${r.errors.join("；")}），提交在服务器上，下次同步时再推`;
-    return r.pushed_new ? "；已推到远端" : "";
+    const ids = r.ids ? `；远端新来的 ${r.ids.items.length} 条补了 id` : "";
+    if (r.errors && r.errors.length) return `${ids}；没推到远端（${r.errors.join("；")}），提交在服务器上，下次同步时再推`;
+    return ids + (r.pushed_new ? "；已推到远端" : "");
   };
   const fields = (pairs) =>
     h("dl", { class: "fields" }, pairs.filter((p) => p && p[1] !== null && p[1] !== undefined && p[1] !== "")

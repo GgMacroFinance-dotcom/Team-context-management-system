@@ -6,10 +6,13 @@
 //! - [`proposal_diff`]：给审核的人看批准以后差在哪里。
 //! - [`edit_item`]：人在审核页里改单条的纯文本，和批准排在同一个提交队列里。
 //! - [`sync`]：和上下文仓库的远端同步（拉、索引、推）。批准和改单条配了远端时也会先拉、后推。
+//!   拉下来的新条目没有 id 时补上（[`assign_since`]）。
+//! - [`assign_all`]：`tcms assign-ids`，给整个仓库里没有 id 的条目补 id。
 
 mod accept;
 mod conflicts;
 mod edit_item;
+mod ids;
 mod propose;
 mod review;
 mod sync;
@@ -17,6 +20,7 @@ mod sync;
 pub use accept::{AcceptOptions, Accepted, WriteError, accept, default_path, reject};
 pub use conflicts::{Conflict, find_conflicts};
 pub use edit_item::{Committer, Edited, ItemEdit, edit_item};
+pub use ids::{AssignedId, IdsAssigned, assign_all, assign_since};
 pub use propose::{
     Draft, MAX_OPEN_PER_AGENT, Proposal, ProposeArgs, ProposeError, item_id_of, propose, reach,
 };
