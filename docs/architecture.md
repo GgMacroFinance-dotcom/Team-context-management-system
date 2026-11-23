@@ -251,11 +251,12 @@ Edited-by: 王审核（tok_01JDX4...）
 | 脱敏 | regex 1 | MIT 或 Apache-2.0 |
 | 审核时的差异 | similar 2 | Apache-2.0 |
 | 命令行 | clap 4 | MIT 或 Apache-2.0 |
+| 内存分配器 | tikv-jemallocator 0.7（带着 jemalloc 5.3 的源码，构建时用 C 编译器和 make 编；开后台线程；MSVC 上不用，用系统自带的） | MIT 或 Apache-2.0；jemalloc 本身是 BSD-2-Clause |
 | 测试审核页的接口（只在测试里） | tower 0.5（util）、http-body-util 0.1 | MIT |
 
 | 以后：Yjs | yrs 0.28 | MIT |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 
@@ -279,17 +280,22 @@ Edited-by: 王审核（tok_01JDX4...）
 | 批准一条（排队、索引带到 HEAD、改文件、提交、增量索引；1 万条） | p95 < 250 毫秒 | 中位数 30 毫秒，p95 35 毫秒 |
 | 服务启动（取条目、建索引、握手） | 不设 | 约 0.3 秒 |
 | 加一个文件、`tcms reindex`，到服务里搜得到（整份重建） | < 2 秒 | 约 0.3 到 0.4 秒（其中 reindex 约 25 毫秒） |
-| 服务处理过请求以后的物理内存（1 万条） | 不设 | 约 55 到 61 MB |
-| 换过 5 次索引以后的物理内存（1 万条） | < 160 MB | 约 85 到 96 MB（修之前约 220 MB，还在涨） |
-| 空闲时内存 | < 50 MB | 没达到，见下面 |
+| 服务处理过请求以后的物理内存（1 万条，刚处理完） | 不设 | 约 74 到 77 MB（jemalloc 还没把放掉的内存还给系统；原来用 glibc 时约 55 到 63 MB） |
+| 换过 5 次索引以后的物理内存（1 万条，刚换完） | < 160 MB | 约 97 到 106 MB（同上；原来用 glibc 时约 73 到 96 MB，改成专门线程之前约 220 MB，还在涨） |
+| 空闲时内存（1 万条，换过 5 次索引以后不发请求，等 20 秒以上、稳下来） | < 50 MB | 约 40 到 41 MB（原来用 glibc 时约 86 MB，等多久都不降）；1000 条约 27 MB（glibc 约 43 MB） |
 
 `tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
 
 审核页（第 5 步）没有加新的基准：它的接口是人点一下调一次，不在热路径上；接受、改单条和 `tcms accept` 走同一个提交队列，批准的耗时已经在 `bench serve` 里量了。
 
-“空闲时内存 < 50 MB”是给第 3 步的常驻服务定的，**1 万条时没达到**：处理过请求以后约 55 到 61 MB，换过几次索引以后约 76 到 97 MB（重建时新旧两份同时在，放掉以后内存留在进程里给下一次用）。其中约 14 MB 是程序本身映射进来的代码，条目加检索索引约 26 到 33 MB。试过的：
+“空闲时内存 < 50 MB”是给第 3 步的常驻服务定的。2026-11-23 把 `tcms` 的内存分配器换成 jemalloc（开后台线程）以后达到了：1 万条换过 5 次索引、空闲 20 秒以后约 40 到 41 MB。其中约 15 到 16 MB 是程序和库映射进来的代码，条目和检索索引真正在用的约 12 MB（条目的结构体约 2 MB、字符串约 7 MB，tantivy 索引约 3 MB），剩下的约 12 MB 没再细分（运行时、数据库连接等）。
 
-- 改成专门线程之前，换过分配器：mimalloc 换 1 次后约 158 MB；jemalloc 换 5 次约 190 MB，空闲 10 秒后回到约 112 MB。都没解决上涨，没用。
-- glibc 的环境变量 `MALLOC_ARENA_MAX=1`：改成专门线程以后再设，处理过请求后约 51 MB，换 5 次后约 84 MB，只低一点，没有写进默认配置。
+原来用 glibc 的 malloc 时没达到：处理过请求以后约 55 到 63 MB，换过几次索引以后约 73 到 97 MB，等多久都不降。量下来，多出来的是建索引时用过又放掉的内存：从 PostgreSQL 取出的行、tantivy 的写入缓冲、换下来的旧索引。glibc 把它们留在进程里，夹在还在用的内存中间，还不回去。用 gdb 在空闲的进程里调一次 `malloc_trim(0)`，物理内存马上降到约 44 到 49 MB，说明只要把放掉的内存还给系统就够了。试过的：
 
-下一步要压到 50 MB 以内，按原来的想法把正文移出内存：只留检索索引和标题、属性，正文按需从 PostgreSQL 取（编一个包多一次查询，约 1 毫秒）。单独一个 PR，等第 4 步以后再看要不要做；条目少的团队（几百、几千条）现在就在 50 MB 以内。
+- 改成专门线程之前，换过分配器：mimalloc 换 1 次后约 158 MB；jemalloc（没开后台线程）换 5 次约 190 MB，空闲 10 秒后回到约 112 MB。那时的问题是多个线程各占一块内存，换分配器解决不了，没用。
+- glibc 的环境变量（改成专门线程以后）：`MALLOC_ARENA_MAX=1`，处理过请求后约 51 MB，换 5 次后约 84 MB；`MALLOC_MMAP_THRESHOLD_=131072`，换 5 次后约 66 MB，两个一起设约 64 MB。都不够，还要部署的人自己设，没用。
+- 在代码里调 glibc 的 `malloc_trim`：要写 `unsafe` 调 C 函数（项目里禁用了 `unsafe`），降下来也刚好在门槛边上，没用。
+- mimalloc 0.1（改成专门线程以后）：处理过请求后约 100 MB，换 5 次后约 120 MB，更高，没用。
+- jemalloc（tikv-jemallocator 0.7，开后台线程）：刚处理完、刚换完时比 glibc 高（见上表，都在 160 MB 以内），后台线程过几秒到十几秒把放掉的内存还给系统：1 万条时 5 秒左右降到约 41 到 46 MB，15 秒左右再降到约 40 MB，之后不变。用了它。
+
+`tcms bench serve` 加了“空闲以后的物理内存”一项：换过 5 次索引以后不发请求，至少等 20 秒，再等到 3 秒里降得不到 1 MB（最多等 40 秒），超过 50 MB 时 `--check` 失败。条目再多会超过（几万条没量过），那时按原来的想法把正文移出内存：只留检索索引和标题、属性，正文按需从 PostgreSQL 取（编一个包多一次查询，约 1 毫秒）。

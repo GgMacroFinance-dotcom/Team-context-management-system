@@ -18,6 +18,13 @@ use tcms_git::{Author, ContextRepo, FileEdit, Remote, RemoteError};
 use tcms_store::Store;
 use tcms_write::RemoteReport;
 
+/// 内存分配器用 jemalloc，开着后台线程。建索引时用过又放掉的内存（取出的行、tantivy 的写入缓冲、换下来的旧索引），
+/// 它过十来秒还给系统；glibc 的 malloc 把这些留在进程里，1 万条换过几次索引以后空闲时约 86 MB，用 jemalloc 约 41 MB
+/// （`tcms bench serve`，docs/architecture.md 第 10 节）。
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser)]
 #[command(name = "tcms", version, about = "面向 agent 的团队上下文系统")]
 struct Cli {

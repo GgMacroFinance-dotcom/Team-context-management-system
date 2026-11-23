@@ -13,6 +13,10 @@ ARG RUST_VERSION=1.97
 ARG DEBIAN_RELEASE=trixie
 
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS build
+# 内存分配器 jemalloc（docs/architecture.md 第 9 节）构建时要用 make 编它的源码，这个镜像里没有 make。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends make \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 # 依赖的下载和编译结果放在缓存里，只改源码时重新构建很快。
