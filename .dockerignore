@@ -1,0 +1,8 @@
+# 构建镜像只要源码。
+target/
+reference/
+tcms-demo/
+.git/
+*.db
+*.db-*
+.env

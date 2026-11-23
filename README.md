@@ -57,6 +57,8 @@ agent 不直接写条目：`context_propose` 只记下提议，人在审核页�
 
 I.P. 的员工怎么接（每个岗位一个令牌，每轮开头取一次包），见 I.P. 仓库的 `docs/ip/team-context.md`。
 
+用 Docker 部署（镜像、单独部署的 compose、和 I.P. 一起部署）见 [`docs/deploy-docker.md`](docs/deploy-docker.md)。
+
 表放在 schema `tcms` 里（`--schema` 或 `TCMS_SCHEMA` 可改），第一次连接时自动建表。
 
 想先看看审核页：`TCMS_DATABASE_URL=postgres://... scripts/review-demo.sh` 造一个小上下文仓库（schema `tcms_demo`，目录 `./tcms-demo`）、发两个令牌、起服务、让 agent 提 4 条提议，然后打开它打印的地址，用它打印的令牌登录。装了 Playwright 的话，`node scripts/review-walk.js ...`（命令也是它打印的）会在无头浏览器里把审核页点一遍。

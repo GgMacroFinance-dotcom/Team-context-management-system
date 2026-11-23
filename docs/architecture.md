@@ -152,7 +152,7 @@ Edited-by: 王审核（tok_01JDX4...）
 ## 5. PostgreSQL
 
 - **版本**：PostgreSQL 15 及以上，打包服务器上用 17。第一版不要求任何扩展。
-- **和 I.P. 怎么分**（2026-11-22 和 I.P. 改 PostgreSQL 的线程对过）：同一个库 `ip`；本系统用 schema `tcms`、登录角色 `tcms_app`，I.P. 用 schema `ip`、角色 `ip_app`；各自只拥有自己的 schema，对另一边没有任何权限，跨系统只走 MCP，不做跨 schema 的 SQL。打包服务器的 compose 只起一个 `postgres:17` 容器，初始化脚本建两个角色和两个 schema，密码走环境变量。
+- **和 I.P. 怎么分**（2026-11-22 和 I.P. 改 PostgreSQL 的线程对过）：同一个库 `ip`；本系统用 schema `tcms`、登录角色 `tcms_app`，I.P. 用 schema `ip`、角色 `ip_app`；各自只拥有自己的 schema，对另一边没有任何权限，跨系统只走 MCP，不做跨 schema 的 SQL。打包服务器的 compose 只起一个 `postgres:17` 容器，初始化脚本建两个角色和两个 schema，密码走环境变量。`tcms_app` 没有在库里建 schema 的权限，所以连接时先查 schema 在不在，已经有了就不再 `CREATE SCHEMA`（`IF NOT EXISTS` 也会先查这个权限，2026-11-23 在 Docker 里试部署时发现）。
 - **迁移记录和锁**：`tcms_app` 的 `search_path` 是 `tcms`，sqlx 的迁移记录表落在 `tcms._sqlx_migrations`。sqlx 迁移时的 advisory lock 键按库名算，I.P. 用自己的固定键，避开它。
 - **通知频道**：LISTEN/NOTIFY 的频道是库级的，本系统的频道一律以 `tcms_` 开头（目前只有 `tcms_changes`），I.P. 用 `ip_` 开头。
 - **表**（`spec.md` 3.4 的四张表改成下面这样，条目本身的历史交给 git）：
@@ -212,7 +212,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 - 数据库换成客户自己的 PostgreSQL 或 Supabase：改 `database_url`。
 - git 远端换成客户自己的：改配置。
-- 用容器跑：官方给一个 Dockerfile 和 compose 示例（PostgreSQL 加 tcms）。
+- 用容器跑：仓库根目录的 `Dockerfile`，单独部署用 `deploy/docker-compose.yml`（PostgreSQL 加 tcms），和 I.P. 一起部署用 I.P. 仓库 compose 里的 `tcms` 服务。见 `docs/deploy-docker.md`。
 - 不接 MCP 的 agent：直接读上下文仓库的文件。
 
 ## 8. 以后和 AFFiNE 同步
