@@ -27,10 +27,12 @@ macro_rules! select_row {
     };
 }
 
+mod proposals;
 mod tokens;
 
 pub use sqlx::postgres::PgListener;
 
+pub use proposals::{Action, Decision, NewProposal, ProposalRow, Proposed};
 pub use tokens::{
     ALL_PROJECTS, Identity, NewToken, TOKEN_PREFIX, TokenRow, VisibleChange, VisibleChanges,
     hash_token,
@@ -149,6 +151,8 @@ pub struct ActiveItem {
 pub struct Store {
     pool: PgPool,
     schema: String,
+    /// 本进程里排队处理提议：等的时候不占数据库连接（跨进程靠 PostgreSQL 的锁）。
+    commit_queue: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 fn valid_schema(s: &str) -> bool {
@@ -189,6 +193,7 @@ impl Store {
         Ok(Self {
             pool,
             schema: schema.to_owned(),
+            commit_queue: Default::default(),
         })
     }
 
@@ -208,6 +213,7 @@ impl Store {
         Ok(Self {
             pool,
             schema: self.schema.clone(),
+            commit_queue: self.commit_queue.clone(),
         })
     }
 

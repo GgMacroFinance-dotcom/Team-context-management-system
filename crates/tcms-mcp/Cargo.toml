@@ -1,6 +1,6 @@
 [package]
 name = "tcms-mcp"
-description = "MCP 服务端：context_get、context_search、context_read、context_changes，stdio 和 Streamable HTTP"
+description = "MCP 服务端：context_get、context_search、context_read、context_changes、context_propose，stdio 和 Streamable HTTP"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,7 @@ tcms-core.workspace = true
 tcms-pack.workspace = true
 tcms-search.workspace = true
 tcms-store.workspace = true
+tcms-write.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

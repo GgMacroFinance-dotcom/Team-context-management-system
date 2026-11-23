@@ -1,7 +1,8 @@
-//! 命令行 `tcms`（`docs/spec.md` 6.2）。现在有上下文仓库、索引、读（`get`、`search`）、令牌和 MCP 服务端的命令。
+//! 命令行 `tcms`（`docs/spec.md` 6.2）。现在有上下文仓库、索引、读（`get`、`search`）、处理提议、令牌和 MCP 服务端的命令。
 
 mod bench;
 mod import;
+mod proposals;
 mod read;
 mod serve;
 mod token;
@@ -99,12 +100,55 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// 列出 agent 的提议（默认只列待审核的）；写了 id 时看这一条：理由、证据、相近的条目和批准以后差在哪里。
+    Proposals {
+        /// 提议 id，形如 prop_ 加 26 位。
+        id: Option<String>,
+        /// 列哪些。
+        #[arg(long, value_enum, default_value = "open", conflicts_with = "id")]
+        status: proposals::Status,
+        /// 用 JSON 输出。
+        #[arg(long)]
+        json: bool,
+    },
+    /// 批准一条提议：改上下文仓库里的 Markdown，做成一个提交，更新索引。可以先改标题、正文再接受。
+    /// 审核的人从环境变量 TCMS_ACTOR（没设时 USER）读，提交者从 TCMS_GIT_NAME、TCMS_GIT_EMAIL 读。
+    Accept {
+        /// 提议 id。
+        id: String,
+        /// 改了标题再接受。
+        #[arg(long)]
+        title: Option<String>,
+        /// 改了正文再接受：从这个文件读，写 - 时从标准输入读。
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+        /// 新建、取代时写进哪个文件（仓库里的相对路径，第一层目录要和提议的范围一致）。默认是 <范围>/<类型>.md，取代时放在旧的后面。
+        #[arg(long)]
+        file: Option<String>,
+        /// 条目在提议之后被人改过时，写明看过的是现在的第几版，照样接受（会覆盖成提议的内容，或 --body-file 给的内容）。
+        #[arg(long)]
+        over: Option<i32>,
+        /// 备注，记进审计。
+        #[arg(long)]
+        note: Option<String>,
+        /// 用 JSON 输出。
+        #[arg(long)]
+        json: bool,
+    },
+    /// 拒绝一条提议。
+    Reject {
+        /// 提议 id。
+        id: String,
+        /// 为什么拒绝，记进审计。
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// 发、列、吊销给 agent 的令牌。
     Token {
         #[command(subcommand)]
         what: token::TokenCmd,
     },
-    /// 启动 MCP 服务端（context_get、context_search、context_read、context_changes）。
+    /// 启动 MCP 服务端（context_get、context_search、context_read、context_changes、context_propose）。
     /// 默认是 Streamable HTTP；--stdio 时走标准输入输出，令牌从 TCMS_TOKEN 读。
     Serve {
         /// 走标准输入输出（给同机、由 agent 启动的进程用）。
@@ -228,6 +272,46 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             read::search(&cli.repo, &store, args).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Proposals { id, status, json } => {
+            let store = connect(&cli.schema).await?;
+            match id {
+                Some(id) => proposals::show(&store, &id, json).await?,
+                None => proposals::list(&store, status, json).await?,
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Accept {
+            id,
+            title,
+            body_file,
+            file,
+            over,
+            note,
+            json,
+        } => {
+            let repo = open_repo(&cli.repo)?;
+            let store = connect(&cli.schema).await?;
+            proposals::accept(
+                &repo,
+                &store,
+                proposals::AcceptArgs {
+                    id,
+                    title,
+                    body_file,
+                    file,
+                    over,
+                    note,
+                    json,
+                },
+            )
+            .await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Reject { id, note } => {
+            let store = connect(&cli.schema).await?;
+            proposals::reject(&store, &id, note.as_deref()).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Token { what } => {
             let store = connect(&cli.schema).await?;
             token::run(&cli.repo, &store, what).await?;
@@ -270,6 +354,14 @@ fn database_url() -> Result<String> {
         Ok(url) if !url.is_empty() => Ok(url),
         _ => bail!("没有设环境变量 TCMS_DATABASE_URL（PostgreSQL 连接串）"),
     }
+}
+
+/// 审计里记的“谁”：环境变量 TCMS_ACTOR，没设时用 USER，再没有就是 cli。
+fn actor() -> String {
+    ["TCMS_ACTOR", "USER"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "cli".to_owned())
 }
 
 /// 提交者：环境变量 TCMS_GIT_NAME、TCMS_GIT_EMAIL，没设时是 tcms <tcms@localhost>。

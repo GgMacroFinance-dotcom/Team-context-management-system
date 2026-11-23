@@ -421,6 +421,7 @@ mod tests {
             line: 1,
             meta_line: None,
             insert_at: 0,
+            span: (0, 1),
         }
     }
 

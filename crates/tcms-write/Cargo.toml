@@ -1,0 +1,26 @@
+[package]
+name = "tcms-write"
+description = "写：agent 的提议（检查、脱敏、找矛盾、挡乱提），人批准后写进 git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+similar.workspace = true
+tcms-core.workspace = true
+tcms-git.workspace = true
+tcms-index.workspace = true
+tcms-search.workspace = true
+tcms-store.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

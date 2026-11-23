@@ -44,6 +44,9 @@ pub struct ParsedItem {
     pub meta_line: Option<usize>,
     /// 没有注释时，新注释插在这一行之前（从 0 开始）。
     pub insert_at: usize,
+    /// 这一条在文件里占的行（从 0 开始，左闭右开，去掉 BOM 以后数）：从标题（单条文件从一级标题或正文开头）
+    /// 到下一个一级、二级标题之前。改写、删除一条时用。
+    pub span: (usize, usize),
 }
 
 /// 参与内容哈希的字段。路径不算内容，单独比较。
@@ -82,6 +85,19 @@ impl ParsedItem {
 pub struct ParsedFile {
     pub items: Vec<ParsedItem>,
     pub warnings: Vec<Warning>,
+    /// 文件开头 YAML 写的默认值。
+    pub defaults: FileDefaults,
+    /// 文件开头 YAML 结束后的第一行（从 0 开始）；没有 YAML 时是 0。
+    pub body_start: usize,
+}
+
+/// 文件开头 YAML 写的、这个文件里条目的默认值。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileDefaults {
+    pub kind: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub owner: Option<String>,
+    pub review_by: Option<String>,
 }
 
 /// 这个路径是不是上下文仓库里的条目文件；是的话返回它的范围。
@@ -170,6 +186,13 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
                     }
                 }
                 body_start = close + 1;
+                out.body_start = body_start;
+                out.defaults = FileDefaults {
+                    kind: defaults.kind.clone(),
+                    tags: defaults.tags.clone(),
+                    owner: defaults.owner.clone(),
+                    review_by: defaults.review_by.clone(),
+                };
             }
             None => warn(
                 &mut out,
@@ -218,8 +241,8 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
         }
     };
 
-    // 每条的范围：(标题, 标题结束后的第一行, 这一条结束的行（不含）)。
-    let mut segments: Vec<(Option<&Heading>, usize, usize)> = Vec::new();
+    // 每条的范围：(标题, 标题结束后的第一行, 这一条结束的行（不含）, 这一条开始的行)。
+    let mut segments: Vec<(Option<&Heading>, usize, usize, usize)> = Vec::new();
     let h2: Vec<&Heading> = headings.iter().filter(|h| h.level == 2).collect();
     if h2.is_empty() {
         let first_h1 = headings.iter().find(|h| h.level == 1);
@@ -234,7 +257,8 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
                 "一级标题之前的内容没有进正文".to_owned(),
             );
         }
-        segments.push((first_h1, start, lines.len()));
+        let from = first_h1.map_or(body_start, |h| h.start);
+        segments.push((first_h1, start, lines.len(), from));
     } else {
         let mut stray: Option<usize> = None;
         let mut cursor = body_start;
@@ -252,7 +276,7 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
             }
             if h.level == 2 {
                 let end = headings.get(i + 1).map_or(lines.len(), |n| n.start);
-                segments.push((Some(h), h.end + 1, end));
+                segments.push((Some(h), h.end + 1, end, h.start));
                 cursor = end;
             } else {
                 cursor = h.end + 1;
@@ -281,7 +305,7 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
         None => None,
     };
 
-    for (heading, start, end) in segments {
+    for (heading, start, end, from) in segments {
         let title = match heading {
             Some(h) => title_of(h),
             None => file_stem(path),
@@ -352,6 +376,8 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
             },
         };
         let review_by = match meta.review_by.or_else(|| defaults.review_by.clone()) {
+            // 写成空的：不要复核日期（用来盖掉文件开头的默认值）。
+            Some(d) if d.trim().is_empty() => None,
             Some(d) if valid_date(&d) => Some(d),
             Some(d) => {
                 warn(
@@ -407,6 +433,7 @@ pub fn parse_file(path: &str, text: &str) -> ParsedFile {
             line: line_no,
             meta_line,
             insert_at: start,
+            span: (from, end),
         });
     }
     out

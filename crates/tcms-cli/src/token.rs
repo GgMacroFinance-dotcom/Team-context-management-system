@@ -8,6 +8,7 @@ use tcms_core::{Scope, TEAMS_FILE, valid_name};
 use tcms_git::ContextRepo;
 use tcms_store::{ALL_PROJECTS, NewToken, Store, TokenRow};
 
+use crate::actor;
 use crate::read::teams_at;
 
 #[derive(Subcommand)]
@@ -47,14 +48,6 @@ pub enum TokenCmd {
         /// 令牌 id，形如 tok_ 加 26 位。
         id: String,
     },
-}
-
-/// 审计里记的“谁”：环境变量 TCMS_ACTOR，没设时用 USER，再没有就是 cli。
-fn actor() -> String {
-    ["TCMS_ACTOR", "USER"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
-        .unwrap_or_else(|| "cli".to_owned())
 }
 
 pub async fn run(repo: &Path, store: &Store, cmd: TokenCmd) -> Result<()> {
