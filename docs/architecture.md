@@ -87,7 +87,7 @@ context/                    ← 一个普通的 git 仓库
 
 **agent 提议**：`context_propose` → PostgreSQL 的 `proposals` 表，状态 `open`。不动 git。提议 id 是 `prop_` 加 ULID。检查、脱敏、找矛盾、挡乱提见 `spec.md` 第 5 节（`crates/tcms-write/src/propose.rs`）。每个令牌没处理的提议数在一个事务里数（先锁住那个令牌的行），重复的内容靠 `content_hash` 上只管 `open` 的唯一索引挡。
 
-**人批准**：审核页或 `tcms accept <id>` → 进提交队列 → 改文件、提交、推送（配了远端的话；第 4 步还没有推送）。提交信息带上：
+**人批准**：审核页或 `tcms accept <id>` → 进提交队列 → 先从远端拉（配了远端的话）→ 改文件、提交 → 推送（配了远端的话，见下面“远端”）。提交信息带上：
 
 ```text
 修改：宏观数据从哪里取
@@ -101,13 +101,14 @@ Accepted-by: <审核的人>
 
 批准一条的步骤（`crates/tcms-write/src/accept.rs`）：
 
-1. 排队：先拿进程里的锁（没拿到之前不占数据库连接），再在一个事务里拿 `pg_advisory_xact_lock`（键是 `tcms_commit:` 加 schema 名，别的进程也排在这里），锁住这条提议的行，确认还是 `open`。
+1. 排队：先拿进程里的锁（没拿到之前不占数据库连接），再在一个事务里拿 `pg_advisory_xact_lock`（键是 `tcms_commit:` 加 schema 名，别的进程也排在这里），锁住这条提议的行，确认还是 `open`。配了远端时接着从远端拉（快进或合并）；合并不了就停在这里。
 2. 把索引带到 HEAD（人可能直接改过仓库），后面的比对都照着 HEAD。
 3. 认一认是不是已经写进去了（做到一半断过）：新建、取代看提议 id 对应的条目在不在；修改看条目是不是已经是提议的样子；归档看是不是已经归档。是的话只记下接受。
 4. 目标要还是生效的；版本号比 `base_revision` 新时停下来（`spec.md` 第 5 节），除非写明看过现在的版本。
 5. 改文件（`crates/tcms-core/src/edit.rs`）：替换、插在某条后面、追加到文件末尾、删掉一条。只动那一条的文字，文件里别的字节原样不动（保留 BOM 和 CRLF）；改完重新解析一遍，核对别的条目没变、改的那条读回来和要写的一样，不一样就不写。文件里只剩前言、一级标题和空行时整个文件删掉。
 6. 提交：要求 HEAD 还是第 2 步看到的那个、工作区是干净的（`ContextRepo::commit_on`），不然不提交、报错。
 7. 增量索引（服务收到通知后换上），记下接受、写成的条目和提交，记进审计，事务提交，放掉锁。
+8. 配了远端时推上去。推不上去只记在结果里，接受已经记下了。
 
 任何一步出错，事务回滚，提议还是 `open`。拒绝也走同一个队列，只改状态、记审计，不动 git。
 
@@ -122,9 +123,19 @@ Item: ctx_01JDX4M6Q8...
 Edited-by: 王审核（tok_01JDX4...）
 ```
 
-**人直接改**：在服务器上改、或者推到远端。服务通过远端的 webhook、定时拉取、或者本地文件监听（notify）发现新提交，拉下来，重建改动部分的索引。
+**人直接改**：在服务器上改、或者推到远端。推到远端的，服务定时拉下来（下面“远端”），重建改动部分的索引；在服务器上直接改的，提交以后运行 `tcms reindex` 或重启服务。远端的 webhook 和本地文件监听（notify）还没做。
 
-**只有一个写入方**：一个 schema 同一时间只处理一条提议（上面第 1 步），所以命令行和服务同时批准也不会丢提交（测试里 4 个进程、每个进程同时批准 3 条，12 个提交都在 HEAD 的历史上；去掉锁时测试会失败）。提交前先拉远端；git 合并不了时，这条提议回到“需要人合并”，不强推（远端第 4 步还没做）。
+**只有一个写入方**：一个 schema 同一时间只处理一条提议（上面第 1 步），所以命令行和服务同时批准也不会丢提交（测试里 4 个进程、每个进程同时批准 3 条，12 个提交都在 HEAD 的历史上；去掉锁时测试会失败）。提交前先拉远端；git 合并不了时，这条提议还是待审核，等人合并，不强推。
+
+**远端**（`crates/tcms-git/src/remote.rs`、`crates/tcms-write/src/sync.rs`，规则见 `spec.md` 6.5）：
+
+- 调 git 命令行，不用 gix：gix 0.90 没有推送，三方合并也要自己拼。只有配了 `TCMS_REMOTE` 时才用到 git 命令行，容器镜像里有 git 和 ssh 客户端。
+- 拉：`git fetch <远端> +refs/heads/<分支>`，取到 `FETCH_HEAD`。取不到时用 `git ls-remote --exit-code` 分辨“远端还没有这个分支”（退出码 2，第一次推之前）和别的错，不靠 git 输出的语言。然后比较本地 HEAD 和远端：一样、本地领先（远端是本地的祖先）就不动；本地落后或还没有提交就 `git merge --ff-only`；两边都有新提交就 `git merge --no-ff`，提交者用这次写入的人，有冲突就记下冲突的文件、`git merge --abort`，把本地 HEAD 强推到远端的旁支 `tcms/<分支>-unmerged`（只有 tcms 写它；主分支从不强推），返回“合并不了”。容器里没有编辑器、人也不一定能上服务器，所以让人在自己的克隆里合并这个旁支，推回主分支，服务器下次拉的时候就是快进。被跟踪的文件有没提交的改动时不拉。
+- 推：`git push --porcelain <远端> <提交>:refs/heads/<分支>`，推具体的提交而不是 `HEAD`，从 `--porcelain` 的输出分辨推上去了、本来就是最新的、被拒（`[rejected]`）和别的错（比如受保护的分支）。
+- 凭据：设了 `TCMS_GIT_TOKEN` 时，每条命令前面加 `-c credential.helper=`（清掉别处配的）和一个 shell 写的凭据助手，git 运行它时才从环境变量展开令牌，所以令牌不在 tcms 传给 git 的参数里，也不写进仓库配置。ssh 远端没设 `GIT_SSH_COMMAND` 时用 `ssh -o BatchMode=yes`，等不到密钥或主机确认就失败。
+- 每条命令都带 `-c safe.directory=<仓库>`、`-c core.hooksPath=/dev/null`、`-c commit.gpgSign=false`、`-c protocol.ext.allow=never`，环境里设 `GIT_TERMINAL_PROMPT=0`、去掉 `GIT_DIR` 这类变量。网络命令 120 秒、本地命令 60 秒没做完就停下（进程跟着结束）。
+- 拉完 HEAD 变了也不用重开仓库：gix 每次从磁盘读引用，找不到的对象会重新扫一遍包目录（测试里拉之前打开的仓库对象，拉完照样能读、能提交）。
+- 服务里的定时同步交给审核页的那个写入线程（上面），和批准、改单条排同一个队；只在拉到新提交、推上去了、或者出错的情况变了时写日志。
 
 **条目在提议之后被人改过**（`base_revision` 落后）：和 `spec.md` 第 5 节一样，要人看过合并结果再接受。
 
@@ -206,12 +217,12 @@ Edited-by: 王审核（tok_01JDX4...）
 **在智能岗位服务器上**
 
 - 一个 PostgreSQL（和 I.P. 共用，见第 5 节），`tcms` 作为 systemd 服务，上下文仓库在 `/var/lib/tcms/context`，可以配一个客户自己的远端（GitHub、Gitea 等）。
-- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`）。
+- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`，远端的 `TCMS_REMOTE`、`TCMS_REMOTE_BRANCH`、`TCMS_GIT_TOKEN`、`TCMS_GIT_USERNAME`、`TCMS_SYNC_SECS`）。
 
 **客户自己改造部署**
 
 - 数据库换成客户自己的 PostgreSQL 或 Supabase：改 `database_url`。
-- git 远端换成客户自己的：改配置。
+- git 远端换成客户自己的：设 `TCMS_REMOTE`（`spec.md` 6.5）。
 - 用容器跑：仓库根目录的 `Dockerfile`，单独部署用 `deploy/docker-compose.yml`（PostgreSQL 加 tcms），和 I.P. 一起部署用 I.P. 仓库 compose 里的 `tcms` 服务。见 `docs/deploy-docker.md`。
 - 不接 MCP 的 agent：直接读上下文仓库的文件。
 
@@ -227,7 +238,7 @@ Edited-by: 王审核（tok_01JDX4...）
 | --- | --- | --- |
 | 异步运行时 | tokio | MIT |
 | PostgreSQL | sqlx 0.9 | MIT 或 Apache-2.0 |
-| git | gix 0.90（纯 Rust，不依赖 libgit2） | MIT 或 Apache-2.0 |
+| git | gix 0.90（纯 Rust，不依赖 libgit2）；和远端拉取、推送用 git 命令行（不是 crate，运行时要装 git） | MIT 或 Apache-2.0 |
 | 全文检索 | tantivy 0.27（不开默认特性：只用内存索引，不要 mmap、压缩、词干） | MIT |
 | MCP | rmcp 3.11（I.P. 用的 3.9；不开默认特性，只开服务端、stdio、Streamable HTTP 服务端，基准和测试另开客户端） | Apache-2.0 |
 | HTTP | axum 0.8（只开 http1、tokio、json、query） | MIT |

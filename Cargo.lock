@@ -3666,6 +3666,7 @@ dependencies = [
  "gix",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

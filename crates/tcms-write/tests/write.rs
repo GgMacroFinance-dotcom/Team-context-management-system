@@ -9,12 +9,12 @@ use std::rc::Rc;
 
 use serde_json::{Value, json};
 use tcms_core::ItemId;
-use tcms_git::{Author, ContextRepo, FileEdit};
+use tcms_git::{Author, ContextRepo, FileEdit, Remote, RemoteError};
 use tcms_search::{Corpus, SearchIndex};
 use tcms_store::{Identity, NewToken, Store};
 use tcms_write::{
-    AcceptOptions, MAX_OPEN_PER_AGENT, Proposal, ProposeArgs, ProposeError, WriteError, accept,
-    propose, reject,
+    AcceptOptions, Committer, ItemEdit, MAX_OPEN_PER_AGENT, Proposal, ProposeArgs, ProposeError,
+    WriteError, accept, edit_item, propose, reject, sync,
 };
 
 const RULE: &str = "ctx_01JDX4M6Q8AAAAAAAAAAAAAAAA";
@@ -770,6 +770,236 @@ async fn concurrent_accepts_keep_every_commit() {
     assert!(
         git(&f.path, &["status", "--porcelain"]).is_empty(),
         "工作区要是干净的"
+    );
+
+    f.store.drop_schema().await.unwrap();
+}
+
+/// 人在自己的克隆里用 git：不签名、不跑钩子，提交者固定，和机器上的全局配置无关。
+fn human_git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(["-c", "user.name=人", "-c", "user.email=human@example.com"])
+        .args(["-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("运行 git");
+    assert!(
+        out.status.success(),
+        "git {args:?}：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// 配了远端：批准前先拉到人推上去的改动，批准后推上去；合并不了时停下来、提议还是待审核；
+/// 连不上远端时照样在本地接受；`sync` 把人推的改动拉进索引。远端是本机的裸仓库。
+#[tokio::test]
+async fn accept_and_edit_with_a_remote() {
+    let Some(f) = fixture().await else { return };
+    let (s, w, dir) = (&f.store, &f.macro_who, f.path.as_path());
+    let remote_dir = tempfile::tempdir().unwrap();
+    let base = remote_dir.path();
+    human_git(base, &["init", "-q", "--bare", "remote.git"]);
+    let bare = base.join("remote.git");
+    let remote = Remote::new(bare.to_str().unwrap(), Some("main"), false).unwrap();
+    let author = Author::default();
+
+    // 第一次同步：远端是空的，推上去。
+    let r = sync(&f.repo, s, &remote, &author).await.unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert!(r.pushed_new && !r.head_moved, "{r:?}");
+    assert_eq!(
+        human_git(&bare, &["rev-parse", "refs/heads/main"]),
+        git(dir, &["rev-parse", "HEAD"]).trim()
+    );
+
+    // 人在自己的克隆里加了一条，推上去。
+    human_git(base, &["clone", "-q", bare.to_str().unwrap(), "human"]);
+    let human = base.join("human");
+    const HUMAN: &str = "ctx_01JDX4M6Q8GGGGGGGGGGGGGGGG";
+    std::fs::write(
+        human.join("org/人写的.md"),
+        format!("## 报告用中文\n<!-- ctx id={HUMAN} kind=rule -->\n报告一律用中文写。\n"),
+    )
+    .unwrap();
+    human_git(&human, &["add", "."]);
+    human_git(&human, &["commit", "-q", "-m", "人加了一条规矩"]);
+    human_git(&human, &["push", "-q", "origin", "main"]);
+    let human_head = human_git(&human, &["rev-parse", "HEAD"]);
+
+    // 批准一条提议：先快进到人的提交（人的那条进了索引），提交在它后面，再推上去。
+    let p = propose_ok(s, w, json!({"action": "update", "item_id": MACRO, "draft": {"body": "CPI、PPI 都用国家统计局的数。"}, "reason": "PPI 也一样"})).await;
+    let mut o = opts();
+    o.remote = Some(remote.clone());
+    let a = accept(&f.repo, s, &p.proposal_id, &o).await.unwrap();
+    let rep = a.remote.clone().expect("配了远端");
+    assert!(rep.errors.is_empty(), "{rep:?}");
+    assert!(
+        rep.head_moved && rep.pushed_new && !rep.needs_merge,
+        "{rep:?}"
+    );
+    assert!(
+        rep.pulled.as_deref().unwrap().starts_with("快进"),
+        "{rep:?}"
+    );
+    assert_eq!(
+        git(dir, &["log", "-1", "--format=%P"]).trim(),
+        human_head,
+        "批准的提交接在人的提交后面"
+    );
+    assert_eq!(
+        human_git(&bare, &["rev-parse", "refs/heads/main"]),
+        a.commit
+    );
+    assert_eq!(s.get_item(HUMAN).await.unwrap().unwrap().status, "active");
+
+    // 改单条也一样：先拉（快进到人刚推的改动）、后推。
+    human_git(&human, &["pull", "-q", "--ff-only"]);
+    std::fs::write(
+        human.join("org/人写的.md"),
+        format!(
+            "## 报告用中文\n<!-- ctx id={HUMAN} kind=rule -->\n报告一律用中文写，术语可以附英文。\n"
+        ),
+    )
+    .unwrap();
+    human_git(&human, &["commit", "-q", "-am", "人改了规矩"]);
+    human_git(&human, &["push", "-q", "origin", "main"]);
+    let row = s.get_item(WEEKLY).await.unwrap().unwrap();
+    let by = Committer {
+        actor: "审核人".to_owned(),
+        author: author.clone(),
+        remote: Some(remote.clone()),
+    };
+    let change = ItemEdit {
+        body: Some("周报用表格，日期写全，单位写明。".to_owned()),
+        ..Default::default()
+    };
+    // 这里拿的是批准之前打开的仓库对象：拉的时候 git 命令行改了 HEAD，它照样读到新的。
+    let e = edit_item(&f.repo, s, WEEKLY, row.revision, &change, &by)
+        .await
+        .unwrap();
+    let rep = e.remote.expect("配了远端");
+    assert!(rep.errors.is_empty(), "{rep:?}");
+    assert!(
+        rep.pulled.as_deref().unwrap().starts_with("快进"),
+        "{rep:?}"
+    );
+    assert_eq!(
+        human_git(&bare, &["rev-parse", "refs/heads/main"]),
+        e.commit
+    );
+    assert_eq!(
+        s.get_item(HUMAN).await.unwrap().unwrap().body,
+        "报告一律用中文写，术语可以附英文。"
+    );
+    human_git(&human, &["pull", "-q", "--ff-only"]);
+    assert_eq!(
+        read(&human, "team-research/周报.md"),
+        read(dir, "team-research/周报.md")
+    );
+
+    // 合并不了：服务这边离线时提交过一个改动（模拟），人在远端改了同一行。批准停下来，提议还是待审核。
+    std::fs::write(
+        human.join("org/人写的.md"),
+        format!("## 报告用中文\n<!-- ctx id={HUMAN} kind=rule -->\n人：报告用中文。\n"),
+    )
+    .unwrap();
+    human_git(&human, &["commit", "-q", "-am", "人又改了规矩"]);
+    human_git(&human, &["push", "-q", "origin", "main"]);
+    f.repo
+        .commit(
+            &[put(
+                "org/人写的.md",
+                &format!("## 报告用中文\n<!-- ctx id={HUMAN} kind=rule -->\n服务：报告用中文。\n"),
+            )],
+            "离线时的改动",
+            &author,
+        )
+        .unwrap();
+    let local_head = git(dir, &["rev-parse", "HEAD"]);
+    let p = propose_ok(s, w, json!({"action": "create", "draft": {"title": "PMI 的口径", "body": "用制造业 PMI。"}, "reason": "常问"})).await;
+    let err = accept(&f.repo, s, &p.proposal_id, &o).await.unwrap_err();
+    match &err {
+        WriteError::Remote(RemoteError::NeedsMerge { files, side, .. }) => {
+            assert_eq!(files, &["org/人写的.md"]);
+            assert_eq!(side.as_deref(), Some("tcms/main-unmerged"));
+        }
+        other => panic!("应该合并不了：{other}"),
+    }
+    assert_eq!(git(dir, &["rev-parse", "HEAD"]), local_head);
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+    let still = s.get_proposal(&p.proposal_id).await.unwrap().unwrap();
+    assert_eq!(still.status, "open");
+    let r = sync(&f.repo, s, &remote, &author).await.unwrap();
+    assert!(r.needs_merge && r.pushed.is_none(), "{r:?}");
+
+    // 人在服务器的仓库里合并好以后，再批准就过了，一起推上去。
+    human_git(dir, &["fetch", "-q", bare.to_str().unwrap(), "main"]);
+    let merged = Command::new("git")
+        .args([
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "user.name=人",
+            "-c",
+            "user.email=human@example.com",
+        ])
+        .args(["merge", "-q", "--no-edit", "FETCH_HEAD"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!merged.status.success(), "这里应该有冲突");
+    std::fs::write(
+        dir.join("org/人写的.md"),
+        format!("## 报告用中文\n<!-- ctx id={HUMAN} kind=rule -->\n合并：报告用中文。\n"),
+    )
+    .unwrap();
+    human_git(dir, &["add", "org/人写的.md"]);
+    human_git(dir, &["commit", "-q", "--no-edit"]);
+    let a = accept(&f.repo, s, &p.proposal_id, &o).await.unwrap();
+    let rep = a.remote.expect("配了远端");
+    assert!(rep.errors.is_empty() && rep.pushed_new, "{rep:?}");
+    assert_eq!(
+        human_git(&bare, &["rev-parse", "refs/heads/main"]),
+        a.commit
+    );
+    assert_eq!(
+        s.get_item(HUMAN).await.unwrap().unwrap().body,
+        "合并：报告用中文。"
+    );
+
+    // 连不上远端：照样在本地接受，错误记在结果里。
+    let gone = Remote::new(
+        base.join("没有这个仓库.git").to_str().unwrap(),
+        Some("main"),
+        false,
+    )
+    .unwrap();
+    let p = propose_ok(s, w, json!({"action": "create", "draft": {"title": "M2 的口径", "body": "用月末值。"}, "reason": "常问"})).await;
+    let mut o = opts();
+    o.remote = Some(gone);
+    let a = accept(&f.repo, s, &p.proposal_id, &o).await.unwrap();
+    assert_eq!(a.proposal.status, "accepted");
+    let rep = a.remote.expect("配了远端");
+    assert_eq!(rep.errors.len(), 2, "{rep:?}");
+    assert!(
+        rep.errors[0].starts_with("拉取：") && rep.errors[1].starts_with("推送："),
+        "{rep:?}"
+    );
+    assert!(rep.pulled.is_none() && rep.pushed.is_none());
+    // 恢复以后同步一次就补推上去了。
+    let r = sync(&f.repo, s, &remote, &author).await.unwrap();
+    assert!(r.errors.is_empty() && r.pushed_new, "{r:?}");
+    assert_eq!(
+        human_git(&bare, &["rev-parse", "refs/heads/main"]),
+        a.commit
     );
 
     f.store.drop_schema().await.unwrap();

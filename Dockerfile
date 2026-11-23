@@ -4,7 +4,7 @@
 #
 #   docker build -t tcms .
 #
-# 镜像里只有 tcms 和 git。上下文仓库在 /var/lib/tcms/context（要挂卷），第一次启动时是空的就 git init 一个。
+# 镜像里只有 tcms、git 和 ssh 客户端。上下文仓库在 /var/lib/tcms/context（要挂卷），第一次启动时是空的就 git init 一个。
 # 容器默认运行 tcms serve：先 tcms reindex 把仓库的 HEAD 同步进 PostgreSQL，再在 0.0.0.0:7341 上提供 /mcp 和审核页。
 # 别的子命令照常用，比如 docker run ... tcms token add --name "I.P. 宏观研报" --role macro。
 # 数据库连接串只从环境变量 TCMS_DATABASE_URL 读，不写进镜像。
@@ -23,9 +23,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:${DEBIAN_RELEASE}-slim
 
-# git：入口脚本给空的上下文仓库 git init，人进容器看历史也用得上（tcms 自己读写仓库不靠它）；tini：转发信号、回收子进程。
+# git：入口脚本给空的上下文仓库 git init；配了远端（TCMS_REMOTE）时 tcms 用它拉取、推送；人进容器看历史、合并也用它。
+# openssh-client：远端是 ssh 地址（git@…）时用。tini：转发信号、回收子进程。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git tini \
+ && apt-get install -y --no-install-recommends ca-certificates git openssh-client tini \
  && rm -rf /var/lib/apt/lists/*
 
 # 不用 root 运行。上下文仓库的目录先建好交给 tcms 用户：挂上新的命名卷时，Docker 会连同属主一起初始化。

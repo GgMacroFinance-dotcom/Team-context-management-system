@@ -1,18 +1,19 @@
 //! 人批准、拒绝提议（`docs/architecture.md` 第 3 节）。
 //!
 //! 批准的步骤：拿到提交队列的锁（本进程里排队，跨进程用 PostgreSQL 的锁，一次只做一个提交）→
-//! 把索引带到 HEAD（人可能直接改过仓库）→ 看目标条目还在不在、版本号有没有变 → 改文件 → 提交
-//! （要求 HEAD 没变）→ 索引（服务收到通知后换上）→ 记下接受了。
+//! 配了远端时先从远端拉（[`crate::sync`]）→ 把索引带到 HEAD（人可能直接改过仓库）→ 看目标条目还在不在、版本号有没有变 → 改文件 → 提交
+//! （要求 HEAD 没变）→ 索引（服务收到通知后换上）→ 记下接受了 → 配了远端时推上去。
 //!
 //! 做到一半断了（提交了但没记下）再批准一次时，认得出已经写进去了，直接记下，不会写两遍：
 //! 新建、取代的条目 id 来自提议 id；修改的看内容是不是已经是提议的样子；归档的看是不是已经归档。
 
 use tcms_core::edit::{Edit, EditError, ItemText, apply};
 use tcms_core::{ItemId, Kind, Scope, normalize_body, normalize_title, parse_file, scope_of_path};
-use tcms_git::{Author, ContextRepo, FileEdit, ObjectId};
+use tcms_git::{Author, ContextRepo, FileEdit, ObjectId, Remote, RemoteError};
 use tcms_store::{Action, ItemRow, ProposalRow, Store};
 
 use crate::propose::item_id_of;
+use crate::sync::{RemoteReport, pull_before, push_after};
 
 /// 批准时人可以先改再接受。
 #[derive(Debug, Clone, Default)]
@@ -30,6 +31,8 @@ pub struct AcceptOptions {
     /// 条目在提议之后被人改过（版本号落后）时，写明看过的是第几版，照样接受（覆盖成提议的样子，或用上面改过的内容）。
     pub over_revision: Option<i32>,
     pub note: Option<String>,
+    /// 上下文仓库的远端：提交之前先拉，提交以后推上去。`None` 是没配远端。
+    pub remote: Option<Remote>,
 }
 
 /// 接受的结果。
@@ -42,6 +45,8 @@ pub struct Accepted {
     pub path: String,
     /// 之前已经写进去了（做到一半断过），这次只是记下。
     pub already_applied: bool,
+    /// 配了远端时，拉和推的结果。
+    pub remote: Option<RemoteReport>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +71,9 @@ pub enum WriteError {
     Edit(#[from] EditError),
     #[error(transparent)]
     Git(#[from] tcms_git::Error),
+    /// 和远端合并不了，要人合并（这时什么都没改）。
+    #[error(transparent)]
+    Remote(#[from] RemoteError),
     #[error(transparent)]
     Index(#[from] tcms_index::Error),
     #[error(transparent)]
@@ -122,6 +130,8 @@ pub async fn accept(
         return bad("--file 只用于新建和取代");
     }
 
+    // 配了远端时先拉：人可能推过新的提交。合并不了就停下来，提议还是待审核。
+    let mut report = pull_before(opts.remote.as_ref(), repo, &opts.author).await?;
     // 人可能直接改过仓库：先把索引带到 HEAD，后面的比对都照着 HEAD。
     tcms_index::reindex(repo, store, false).await?;
     let head = repo.head()?;
@@ -163,12 +173,15 @@ pub async fn accept(
         let proposal = decision
             .accept(&opts.actor, opts.note.as_deref(), &result_id, &commit)
             .await?;
+        // 上次可能是推之前断的。
+        push_after(opts.remote.as_ref(), repo, &mut report).await;
         return Ok(Accepted {
             proposal,
             item: result_id,
             commit,
             path,
             already_applied: true,
+            remote: report,
         });
     }
 
@@ -275,12 +288,15 @@ pub async fn accept(
     let proposal = decision
         .accept(&opts.actor, opts.note.as_deref(), &result_id, &commit)
         .await?;
+    // 接受已经记下了，推不上去只记在结果里，下次同步再推。
+    push_after(opts.remote.as_ref(), repo, &mut report).await;
     Ok(Accepted {
         proposal,
         item: result_id,
         commit,
         path,
         already_applied: false,
+        remote: report,
     })
 }
 

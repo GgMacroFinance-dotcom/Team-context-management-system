@@ -33,6 +33,12 @@ services:
       # 从别的机器或容器用域名、IP 连时写上它们（逗号隔开）；默认只接受 Host 是本机的请求。
       TCMS_ALLOWED_HOSTS: ${TCMS_ALLOWED_HOSTS:-}
       TCMS_GIT_EMAIL: ${TCMS_GIT_EMAIL:-}
+      # 可选：上下文仓库推到自己的 git 远端（docs/deploy-docker.md“推到自己的 git 远端”）。不写就只在卷里。
+      TCMS_REMOTE: ${TCMS_REMOTE:-}
+      TCMS_REMOTE_BRANCH: ${TCMS_REMOTE_BRANCH:-}
+      TCMS_GIT_TOKEN: ${TCMS_GIT_TOKEN:-}
+      TCMS_GIT_USERNAME: ${TCMS_GIT_USERNAME:-}
+      TCMS_SYNC_SECS: ${TCMS_SYNC_SECS:-60}
     depends_on:
       postgres:
         condition: service_healthy

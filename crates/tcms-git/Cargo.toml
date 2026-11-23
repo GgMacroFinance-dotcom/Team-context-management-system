@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 gix = { workspace = true, features = ["sha1", "index", "status"] }
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

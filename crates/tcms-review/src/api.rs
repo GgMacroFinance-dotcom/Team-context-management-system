@@ -41,6 +41,10 @@ impl ApiError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
 
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub(crate) fn with_current(mut self, current: i32) -> Self {
         self.current = Some(current);
         self
@@ -240,6 +244,8 @@ pub(crate) async fn accept(
         file: given(b.file),
         over_revision: b.over,
         note: given(b.note),
+        // 远端由写入线程填。
+        remote: None,
     };
     state.writer.accept(id, opts).await.map(Json)
 }

@@ -3,6 +3,7 @@
 //! 读：某个提交里有哪些文件、两个提交之间哪些文件变了、读文件内容。
 //! 写：把一组文件改动做成一个提交，同时更新工作区和暂存区。服务是唯一的写入方，
 //! 写之前要求工作区是干净的，免得覆盖人还没提交的改动。
+//! 远端：拉取、推送（[`Remote`]，调 git 命令行）。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,9 @@ use gix::bstr::ByteSlice;
 use gix::objs::tree::EntryKind;
 
 pub use gix::ObjectId;
+
+mod remote;
+pub use remote::{Pulled, Pushed, Remote, RemoteError, redact};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

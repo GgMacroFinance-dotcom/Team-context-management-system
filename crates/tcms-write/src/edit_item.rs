@@ -1,14 +1,16 @@
 //! 人在审核页里改单条的纯文本（`docs/spec.md` 6.4）：标题、正文、标签、复核日期。
 //!
-//! 和批准提议排在同一个提交队列里，步骤也一样：把索引带到 HEAD → 看版本号有没有变 → 改文件 → 提交（HEAD 没变才提交）→ 索引。
+//! 和批准提议排在同一个提交队列里，步骤也一样：配了远端时先拉 → 把索引带到 HEAD → 看版本号有没有变 → 改文件 →
+//! 提交（HEAD 没变才提交）→ 索引 → 配了远端时推上去。
 //! 这是人写的修改，可以改规则；不过脱敏（人自己负责）。类型、范围不在这里改。
 
 use tcms_core::edit::{Edit, ItemText, apply};
 use tcms_core::{ItemId, normalize_body, normalize_title, parse_file, valid_date};
-use tcms_git::{Author, ContextRepo, FileEdit};
+use tcms_git::{Author, ContextRepo, FileEdit, Remote};
 use tcms_store::Store;
 
 use crate::accept::{WriteError, read_at};
+use crate::sync::{RemoteReport, pull_before, push_after};
 
 /// 改成什么样。`None` 的字段不动。
 #[derive(Debug, Clone, Default)]
@@ -20,6 +22,17 @@ pub struct ItemEdit {
     pub review_by: Option<String>,
 }
 
+/// 谁改的、用谁的名字提交、提交以后推到哪里。
+#[derive(Debug, Clone, Default)]
+pub struct Committer {
+    /// 审计里记的“谁”。
+    pub actor: String,
+    /// git 提交者。
+    pub author: Author,
+    /// 上下文仓库的远端，`None` 是没配。
+    pub remote: Option<Remote>,
+}
+
 /// 改完的结果。
 #[derive(Debug, Clone)]
 pub struct Edited {
@@ -27,6 +40,8 @@ pub struct Edited {
     pub revision: i32,
     pub commit: String,
     pub path: String,
+    /// 配了远端时，拉和推的结果。
+    pub remote: Option<RemoteReport>,
 }
 
 /// 改一条。`base_revision` 是改的人看到的版本号，落后了（别人刚改过）就停下来。
@@ -36,10 +51,11 @@ pub async fn edit_item(
     id: &str,
     base_revision: i32,
     change: &ItemEdit,
-    actor: &str,
-    author: &Author,
+    by: &Committer,
 ) -> Result<Edited, WriteError> {
+    let actor = by.actor.as_str();
     let lock = store.begin_commit().await?;
+    let mut report = pull_before(by.remote.as_ref(), repo, &by.author).await?;
     tcms_index::reindex(repo, store, false).await?;
     let head = repo.head()?;
     let row = match store.get_item(id).await? {
@@ -114,7 +130,7 @@ pub async fn edit_item(
             content: content.map(String::into_bytes),
         }],
         &message,
-        author,
+        &by.author,
     )?;
     tcms_index::reindex(repo, store, false).await?;
     let revision = store
@@ -125,10 +141,12 @@ pub async fn edit_item(
     let commit = commit.to_string();
     let detail = serde_json::json!({"commit": commit, "revision": revision, "path": row.path});
     lock.finish(actor, "item.edit", id, detail).await?;
+    push_after(by.remote.as_ref(), repo, &mut report).await;
     Ok(Edited {
         item: id.to_owned(),
         revision,
         commit,
         path: row.path,
+        remote: report,
     })
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde_json::json;
-use tcms_git::ContextRepo;
+use tcms_git::{ContextRepo, Remote};
 use tcms_store::{ItemRow, ProposalRow, Store};
 use tcms_write::{AcceptOptions, Conflict, DiffLine, proposal_diff};
 
@@ -230,7 +230,12 @@ pub struct AcceptArgs {
 }
 
 /// 批准：写进 git，提交，索引。
-pub async fn accept(repo: &ContextRepo, store: &Store, a: AcceptArgs) -> Result<()> {
+pub async fn accept(
+    repo: &ContextRepo,
+    store: &Store,
+    remote: Option<Remote>,
+    a: AcceptArgs,
+) -> Result<()> {
     let body = match &a.body_file {
         None => None,
         Some(p) if p.as_os_str() == "-" => {
@@ -252,6 +257,7 @@ pub async fn accept(repo: &ContextRepo, store: &Store, a: AcceptArgs) -> Result<
         file: a.file,
         over_revision: a.over,
         note: a.note,
+        remote,
     };
     let done = tcms_write::accept(repo, store, &a.id, &opts).await?;
     if a.json {
@@ -263,6 +269,7 @@ pub async fn accept(repo: &ContextRepo, store: &Store, a: AcceptArgs) -> Result<
                 "commit": done.commit,
                 "path": done.path,
                 "already_applied": done.already_applied,
+                "remote": done.remote,
             }))?
         );
     } else if done.already_applied {
@@ -280,6 +287,11 @@ pub async fn accept(repo: &ContextRepo, store: &Store, a: AcceptArgs) -> Result<
             done.commit
         );
         println!("索引已更新；运行中的 tcms serve 收到通知后换上新索引。");
+    }
+    if !a.json
+        && let Some(r) = &done.remote
+    {
+        crate::print_remote(r);
     }
     Ok(())
 }
