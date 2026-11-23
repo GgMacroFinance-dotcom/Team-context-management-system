@@ -42,6 +42,7 @@ tempfile = "3"
 similar = "2"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"
+tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

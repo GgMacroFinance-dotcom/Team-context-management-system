@@ -5,7 +5,8 @@
 //! - `context_get`、`context_search` 经过 stdio 的一次往返（含每次调用核对令牌）；
 //! - 令牌核对本身（查一次 PostgreSQL）；
 //! - 加一个文件、`tcms reindex` 以后，服务多久能搜到新内容（收到通知后整份重建）；
-//! - 子进程处理过请求以后的物理内存，换过 1 次和 5 次索引以后的（看重建会不会让内存越涨越多）；
+//! - 子进程处理过请求以后的物理内存，换过 1 次和 5 次索引以后的（看重建会不会让内存越涨越多），
+//!   以及换过以后不发请求、空闲下来的物理内存（放掉的内存还给系统以后）；
 //! - `context_propose` 经过 stdio 的一次往返（检查、找相近的条目、写进 PostgreSQL；量完马上拒掉，免得撞上每个令牌 20 条的上限）；
 //! - 批准一条（排队、把索引带到 HEAD、改文件、提交、增量索引）。
 
@@ -38,6 +39,13 @@ const SWAP_LIMIT: Duration = Duration::from_secs(2);
 const SWAPS: usize = 5;
 /// 换过 [`SWAPS`] 次索引以后子进程物理内存的门槛（MB，1 万条）。修之前 5 次约 220 MB，还在涨。
 const RSS_LIMIT_MB: u64 = 160;
+/// 换过 [`SWAPS`] 次索引、再空闲下来以后子进程物理内存的门槛（MB，1 万条）。
+const IDLE_LIMIT_MB: u64 = 50;
+/// 空闲时最少等多久再看稳没稳。jemalloc 的后台线程分几次把放掉的内存还给系统：1 万条时 5 秒左右降一大截，
+/// 中间平几秒，15 秒左右再降一点，所以不能平了几秒就当稳了。
+const IDLE_MIN_WAIT: Duration = Duration::from_secs(20);
+/// 空闲时最多等多久。
+const IDLE_MAX_WAIT: Duration = Duration::from_secs(40);
 /// 新内容里的词，别的条目里没有。
 const MARKER: &str = "benchswapmarker";
 /// `context_propose` 经过 stdio 一次往返的 p95 门槛。
@@ -91,6 +99,11 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
         mb(m.rss_swapped),
         mb(m.rss_swapped_all)
     );
+    println!(
+        "  空闲 {:.0} 秒以后的物理内存 {}（门槛 {IDLE_LIMIT_MB} MB）",
+        m.idle_wait.as_secs_f64(),
+        mb(m.rss_idle)
+    );
 
     let mut failed = false;
     for (bad, what) in [
@@ -103,6 +116,10 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
         (
             m.rss_swapped_all.is_some_and(|kb| kb > RSS_LIMIT_MB * 1024),
             "换过几次索引后的物理内存",
+        ),
+        (
+            m.rss_idle.is_some_and(|kb| kb > IDLE_LIMIT_MB * 1024),
+            "空闲时的物理内存",
         ),
     ] {
         if bad {
@@ -136,6 +153,32 @@ struct Measured {
     rss_served: Option<u64>,
     rss_swapped: Option<u64>,
     rss_swapped_all: Option<u64>,
+    rss_idle: Option<u64>,
+    idle_wait: Duration,
+}
+
+/// 不发请求，等子进程的物理内存稳下来：等满 [`IDLE_MIN_WAIT`] 以后，3 秒里降得不到 1 MB 就算稳了，
+/// 最多等 [`IDLE_MAX_WAIT`]。返回那时的物理内存（KB）和等了多久。
+async fn settle(pid: Option<u32>) -> (Option<u64>, Duration) {
+    const EVERY: Duration = Duration::from_millis(500);
+    const WINDOW: usize = 6;
+    let t = Instant::now();
+    let Some(pid) = pid else {
+        return (None, Duration::ZERO);
+    };
+    let mut samples = Vec::new();
+    loop {
+        let Some(kb) = rss_kb(Some(pid)) else {
+            return (None, t.elapsed());
+        };
+        samples.push(kb);
+        let steady =
+            samples.len() > WINDOW && samples[samples.len() - 1 - WINDOW].saturating_sub(kb) < 1024;
+        if (t.elapsed() >= IDLE_MIN_WAIT && steady) || t.elapsed() >= IDLE_MAX_WAIT {
+            return (Some(kb), t.elapsed());
+        }
+        tokio::time::sleep(EVERY).await;
+    }
 }
 
 async fn call(client: &RunningService<RoleClient, ()>, name: &str, args: Value) -> Result<Value> {
@@ -307,6 +350,7 @@ async fn measure(
         tokio::time::sleep(Duration::from_millis(300)).await;
         rss_swapped.push(pid.and_then(|p| rss_kb(Some(p))));
     }
+    let (rss_idle, idle_wait) = settle(pid).await;
 
     // 提议：量完一条马上拒掉，留下 ACCEPTS 条量批准。
     let mut propose = Vec::with_capacity(requests);
@@ -363,5 +407,7 @@ async fn measure(
         rss_served,
         rss_swapped: rss_swapped[0],
         rss_swapped_all: rss_swapped[SWAPS - 1],
+        rss_idle,
+        idle_wait,
     })
 }
