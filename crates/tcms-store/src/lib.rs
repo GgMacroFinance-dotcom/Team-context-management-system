@@ -170,17 +170,26 @@ impl Store {
         }
         let base = PgConnectOptions::from_str(url)?;
         // 先用不带 search_path 的连接建 schema（打包服务器上由初始化脚本建好，这里是兜底）。
+        // 先查再建：和 I.P. 共用一个库时，tcms 的账号只拥有自己的 schema、没有在库里建 schema 的权限，
+        // 而 CREATE SCHEMA IF NOT EXISTS 不管 schema 在不在都先查这个权限，会报 permission denied。
         {
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .connect_with(base.clone())
                 .await?;
-            // schema 名在上面校验过，只含小写字母、数字、下划线。
-            sqlx::query(AssertSqlSafe(format!(
-                "CREATE SCHEMA IF NOT EXISTS {schema}"
-            )))
-            .execute(&pool)
-            .await?;
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)")
+                    .bind(schema)
+                    .fetch_one(&pool)
+                    .await?;
+            if !exists {
+                // schema 名在上面校验过，只含小写字母、数字、下划线。
+                sqlx::query(AssertSqlSafe(format!(
+                    "CREATE SCHEMA IF NOT EXISTS {schema}"
+                )))
+                .execute(&pool)
+                .await?;
+            }
             pool.close().await;
         }
         let options = base.options([("search_path", schema)]);

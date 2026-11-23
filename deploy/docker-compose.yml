@@ -1,0 +1,48 @@
+# 单独部署团队上下文系统：一个 PostgreSQL 加 tcms。步骤见 docs/deploy-docker.md，简单说：
+#
+#   cd deploy
+#   cp env.example .env               # 填 POSTGRES_PASSWORD
+#   docker compose up -d --build
+#   docker compose run --rm tcms token add --name "某个 agent" --role macro
+#
+# 和 I.P. 一起部署时不用这个文件：I.P. 仓库的 rust/docker-compose.yml 里有 tcms 服务，和 I.P. 共用一个 PostgreSQL。
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tcms
+      POSTGRES_DB: tcms
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设 POSTGRES_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tcms -d tcms"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 60s
+
+  tcms:
+    build: ..
+    image: tcms:latest
+    restart: unless-stopped
+    environment:
+      # 密码用 openssl rand -hex 24 生成，只有十六进制字符，直接放进连接串不用转义。
+      TCMS_DATABASE_URL: postgres://tcms:${POSTGRES_PASSWORD}@postgres:5432/tcms
+      # 从别的机器或容器用域名、IP 连时写上它们（逗号隔开）；默认只接受 Host 是本机的请求。
+      TCMS_ALLOWED_HOSTS: ${TCMS_ALLOWED_HOSTS:-}
+      TCMS_GIT_EMAIL: ${TCMS_GIT_EMAIL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # /mcp 和审核页 /review。只给本机；对外提供时放在 HTTPS 反向代理后面。
+      - "127.0.0.1:7341:7341"
+    volumes:
+      - context:/var/lib/tcms/context
+    stop_grace_period: 30s
+
+volumes:
+  pg-data:
+  context:
