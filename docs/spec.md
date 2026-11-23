@@ -102,7 +102,7 @@ project:<项目>     ← 和团队、岗位交叉，挂在 org 下面
 
 文件格式、表结构、写入和索引的流程见 [`architecture.md`](architecture.md) 第 2 到 6 节。
 
-写入前过一遍密钥脱敏（照 I.P. 的 `redact`）。
+写入前过一遍密钥脱敏（照 I.P. 的 `redact`）。第 4 步做了：提议存进 PostgreSQL 以前，标题、正文、标签、理由、证据都过一遍（`crates/tcms-core/src/redact.rs`，规则和 I.P. 的对齐，按本仓库的许可自己写的），认出来的换成 `[已脱敏]`，提议上记下抹了几处。
 
 ## 4. 读：编译上下文包
 
@@ -136,6 +136,16 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 - **晋升**：agent 在对话里发现的事，先作为 `memory` 提到岗位范围；人批准后，系统可以再建议把它提到团队或全公司（人再批准一次）。不自动晋升，免得一句话悄悄影响所有人。
 - 人批准时可以先改再接受。条目在提议之后被人改过（`base_revision` 落后），要人看过合并结果再保存，不自动合并。
 - I.P. 现有的岗位记忆（D-1，按岗位合并出的摘要）以后作为晋升的来源之一：合并后找出对团队都成立的内容，变成提议。
+- 第 4 步（2026-11-23）的细节：
+  - 四种动作：`create` 新建；`update` 改一条，只写要改的字段，不能换范围；`supersede` 写一条新的取代旧的，可以换范围，要写新的正文；`archive` 归档，不写 `draft`。
+  - 能往哪里提：`org`、令牌的团队、令牌的岗位、令牌允许的项目。新建默认 `role:<岗位>`，类型默认 `memory`。`rule` 不能提、不能改、不能归档，回答里说明可以提一条 `decision` 或 `memory` 写明建议。看不到的条目和不存在的回答一样。
+  - 存进去的是批准以后那一条完整的样子：没写的字段从当时的条目补上，记下当时的版本号（`base_revision`）。审核的人看到的就是会写进去的东西。
+  - 找矛盾：同范围、同类型的生效条目里，标题按检索的规则切词，重合的比例 = 共有的词数 / 词少的那边的词数；标签（不算 `pinned`）按交集 / 并集；两个取大的，到 50% 就列出来，最多 5 条，按相近程度排。要改、要取代的那一条自己不算。只列出来给人看，不挡提议。
+  - 挡乱提：每个令牌最多 20 条没处理的；内容（动作、目标、范围、类型、标题、正文、标签、复核日期，不算理由）一样的、还没处理的提议只留一条，不管是谁提的，再提时返回原来那条，`duplicate` 为真。
+  - 上限：标题 200 字，正文 2 万字，理由 1 到 2 千字，证据最多 10 条、每条 500 字，标签最多 20 个、每个 50 字、不能有逗号换行引号。正文写进 Markdown 以后要能原样读回来（比如不能有一级、二级标题），不行就挡下并说明。
+  - 批准：可以改标题、正文再接受。新建默认写进 `<范围目录>/<类型的中文名>.md`（比如 `role-macro/记忆.md`），可以指定同范围的别的文件；取代默认插在旧的那条后面（范围不同时写进新范围的默认文件）。目标被归档或取代了，只能拒绝。`base_revision` 落后时停下来，审核的人看过现在的内容以后写明看过的版本号（`--over N`）才接受，可以同时给出合并后的正文。
+  - 新建、取代写成的条目 id 用提议 id 里那串 ULID（`prop_X` 批准后是 `ctx_X`），提议时就告诉 agent。批准做到一半断了（提交了但没记下），再批准一次时认得出已经写进去了，只记下，不写第二遍。
+  - 晋升（岗位到团队、全公司）和审核页还没做。
 
 ## 6. 接口
 
@@ -152,7 +162,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 - 调用者的身份（团队、岗位）在连接时由令牌决定，参数里的 `role` 必须和令牌一致，看不到的条目和不存在的条目回答一样。
 - 传输：stdio 和 Streamable HTTP 两种。
 - 第 3 步（2026-11-23）的细节：
-  - 前四个工具做了，`context_propose` 第 4 步和提议一起做。
+  - 前四个工具做了，`context_propose` 第 4 步和提议一起做（见第 5 节的细节）。返回 `proposal_id`、`status`、`duplicate`、`action`、`item_id`、批准后的条目 id `result_item_id`、范围、类型、标题、`conflicts`（id、版本、范围、类型、标题、相近程度 0 到 100）、`redacted`（抹了几处）和一句 `note`。
   - 令牌写岗位、团队（可以没有）和能在 `context_get` 里声明的项目（可以是“任何项目”）。`team` 参数可以不写，写了要和令牌一致；声明了令牌不允许的项目，当作这个项目下没有条目，和不存在的项目回答一样，都只多一句提醒。
   - `context_search`、`context_read`、`context_changes` 看的范围是 `org`、令牌的团队和岗位，加上令牌允许的项目（不用每次声明）。
   - `context_read` 读旧版本时，按那个版本当时所在的范围判断能不能看；`superseded_by` 只列调用者看得到的。
@@ -161,7 +171,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 ### 6.2 命令行
 
-`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals`、`tcms accept|reject <id>`、`tcms review-due`、`tcms token add|list|revoke`（给 agent 发令牌，明文只显示一次）、`tcms serve [--stdio]`、`tcms bench`。
+`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals [<id>] [--status open|accepted|rejected|all]`（列表；写 id 时看一条：理由、证据、相近的条目、批准以后的差异）、`tcms accept <id> [--title] [--body-file] [--file] [--over N] [--note]`、`tcms reject <id> [--note]`、`tcms review-due`、`tcms token add|list|revoke`（给 agent 发令牌，明文只显示一次）、`tcms serve [--stdio]`、`tcms bench`。
 
 ### 6.3 Markdown 和导入
 
@@ -216,7 +226,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | 1 ✓ | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import`、`tcms assign-ids`、`tcms bench index`。**已做（2026-11-22）**，只在本地 PostgreSQL 16 和测试里跑过，没接真实团队的资料 | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
 | 2 ✓ | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms search`、`tcms bench read`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和造出来的基准数据上跑过，没接真实团队的资料 | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
 | 3 ✓ | MCP 服务端：四个读的工具（`context_propose` 挪到第 4 步），stdio 和 HTTP，令牌定范围；`tcms token`、`tcms serve`、`tcms bench serve`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端）和造出来的基准数据上跑过，没接真实的 agent | 用 MCP 客户端测；越权读回答和不存在一样 |
-| 4 | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议、`context_propose` | 单元测试；并发批准不丢提交 |
+| 4 ✓ | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议、`context_propose`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端，4 个进程同时批准 12 条）和造出来的基准数据上跑过，没接真实的 agent；还不推送到远端 | 单元测试；并发批准不丢提交 |
 | 5 | 审核页 | 浏览器里点一遍 |
 | 6 | I.P. 接入（在 I.P. 主仓库开 PR） | 先假模型，再真实模型 |
 | 7 | 评测：一批必须用到团队上下文才能答对的问题，比较接上前后 | 真实模型，要花费用，开工前问维护者 |

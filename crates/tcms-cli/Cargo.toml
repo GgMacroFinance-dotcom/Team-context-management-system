@@ -25,5 +25,6 @@ tcms-mcp.workspace = true
 tcms-pack.workspace = true
 tcms-search.workspace = true
 tcms-store.workspace = true
+tcms-write.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

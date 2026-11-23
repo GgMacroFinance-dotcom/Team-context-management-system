@@ -26,6 +26,8 @@ pub enum Error {
     UntrackedExists(String),
     #[error("路径不对：{0}")]
     BadPath(String),
+    #[error("HEAD 已经变了（别人刚提交过），重新读一遍再改")]
+    HeadMoved,
     #[error("读写文件 {path}：{source}")]
     Io {
         path: PathBuf,
@@ -132,11 +134,26 @@ impl ContextRepo {
 
     /// 把一组改动做成一个提交，HEAD 往前走一步，工作区和暂存区跟着更新。
     pub fn commit(&self, edits: &[FileEdit], message: &str, author: &Author) -> Result<ObjectId> {
+        let parent = self.head()?;
+        self.commit_on(parent, edits, message, author)
+    }
+
+    /// 和 [`ContextRepo::commit`] 一样，但要求 HEAD 还是 `parent`（改动是照着 `parent` 算的）。
+    /// HEAD 变了返回 [`Error::HeadMoved`]，不提交。
+    pub fn commit_on(
+        &self,
+        parent: Option<ObjectId>,
+        edits: &[FileEdit],
+        message: &str,
+        author: &Author,
+    ) -> Result<ObjectId> {
         let workdir = self.repo.workdir().ok_or(Error::Bare)?.to_owned();
+        if self.head()? != parent {
+            return Err(Error::HeadMoved);
+        }
         if self.repo.is_dirty()? {
             return Err(Error::Dirty);
         }
-        let parent = self.head()?;
         let base_files = match parent {
             Some(p) => self.files(p)?,
             None => BTreeMap::new(),

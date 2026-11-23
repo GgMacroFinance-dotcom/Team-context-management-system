@@ -99,6 +99,19 @@ impl Kind {
         }
     }
 
+    /// 中文名，批准提议时默认的文件名用（`role-macro/记忆.md`）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Rule => "规则",
+            Kind::Decision => "决定",
+            Kind::Fact => "事实",
+            Kind::Term => "术语",
+            Kind::Procedure => "流程",
+            Kind::Reference => "资料",
+            Kind::Memory => "记忆",
+        }
+    }
+
     /// 地位，数字越小越高（`docs/spec.md` 3.3）：
     /// 1 组织规则，2 人写的决定、事实、术语、流程，3 资料，4 记忆。
     pub fn authority(self) -> i16 {

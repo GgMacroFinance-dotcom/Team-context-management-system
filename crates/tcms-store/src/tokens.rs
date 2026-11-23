@@ -276,7 +276,7 @@ impl Store {
     }
 }
 
-async fn audit(
+pub(crate) async fn audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor: &str,
     action: &str,

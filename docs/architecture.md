@@ -1,6 +1,6 @@
 # 技术路线
 
-> 2026-11-22 写，按维护者当天定的路线。状态：第 1 步（索引）、第 2 步（检索、上下文包）、第 3 步（MCP 服务端）有代码，后面几步只有设计。
+> 2026-11-22 写，按维护者当天定的路线。状态：第 1 步（索引）、第 2 步（检索、上下文包）、第 3 步（MCP 服务端）、第 4 步（提议和批准）有代码，后面几步只有设计。
 > 讲“怎么做”；“做什么”（条目、范围、上下文包、提议、接口）见 [`spec.md`](spec.md)。
 
 ## 0. 已定的事（2026-11-22，维护者）
@@ -85,19 +85,35 @@ context/                    ← 一个普通的 git 仓库
 
 ## 3. 写入
 
-**agent 提议**：`context_propose` → PostgreSQL 的 `proposals` 表，状态 `open`。不动 git。
+**agent 提议**：`context_propose` → PostgreSQL 的 `proposals` 表，状态 `open`。不动 git。提议 id 是 `prop_` 加 ULID。检查、脱敏、找矛盾、挡乱提见 `spec.md` 第 5 节（`crates/tcms-write/src/propose.rs`）。每个令牌没处理的提议数在一个事务里数（先锁住那个令牌的行），重复的内容靠 `content_hash` 上只管 `open` 的唯一索引挡。
 
-**人批准**：审核页或 `tcms accept <id>` → 进提交队列 → 服务改文件、提交、推送（配了远端的话）。提交信息带上：
+**人批准**：审核页（第 5 步）或 `tcms accept <id>` → 进提交队列 → 改文件、提交、推送（配了远端的话；第 4 步还没有推送）。提交信息带上：
 
 ```text
-Proposal: p_01JDX5...
-Proposed-by: macro-researcher-1
+修改：宏观数据从哪里取
+
+<提议的理由>
+
+Proposal: prop_01JDX5...
+Proposed-by: I.P. 宏观 (tok_01JDX4...)
 Accepted-by: <审核的人>
 ```
 
+批准一条的步骤（`crates/tcms-write/src/accept.rs`）：
+
+1. 排队：先拿进程里的锁（没拿到之前不占数据库连接），再在一个事务里拿 `pg_advisory_xact_lock`（键是 `tcms_commit:` 加 schema 名，别的进程也排在这里），锁住这条提议的行，确认还是 `open`。
+2. 把索引带到 HEAD（人可能直接改过仓库），后面的比对都照着 HEAD。
+3. 认一认是不是已经写进去了（做到一半断过）：新建、取代看提议 id 对应的条目在不在；修改看条目是不是已经是提议的样子；归档看是不是已经归档。是的话只记下接受。
+4. 目标要还是生效的；版本号比 `base_revision` 新时停下来（`spec.md` 第 5 节），除非写明看过现在的版本。
+5. 改文件（`crates/tcms-core/src/edit.rs`）：替换、插在某条后面、追加到文件末尾、删掉一条。只动那一条的文字，文件里别的字节原样不动（保留 BOM 和 CRLF）；改完重新解析一遍，核对别的条目没变、改的那条读回来和要写的一样，不一样就不写。文件里只剩前言、一级标题和空行时整个文件删掉。
+6. 提交：要求 HEAD 还是第 2 步看到的那个、工作区是干净的（`ContextRepo::commit_on`），不然不提交、报错。
+7. 增量索引（服务收到通知后换上），记下接受、写成的条目和提交，记进审计，事务提交，放掉锁。
+
+任何一步出错，事务回滚，提议还是 `open`。拒绝也走同一个队列，只改状态、记审计，不动 git。
+
 **人直接改**：在服务器上改、或者推到远端。服务通过远端的 webhook、定时拉取、或者本地文件监听（notify）发现新提交，拉下来，重建改动部分的索引。
 
-**只有一个写入方**：服务里一个队列，一次只做一个提交。提交前先拉远端；git 合并不了时，这条提议回到“需要人合并”，不强推。
+**只有一个写入方**：一个 schema 同一时间只处理一条提议（上面第 1 步），所以命令行和服务同时批准也不会丢提交（测试里 4 个进程、每个进程同时批准 3 条，12 个提交都在 HEAD 的历史上；去掉锁时测试会失败）。提交前先拉远端；git 合并不了时，这条提议回到“需要人合并”，不强推（远端第 4 步还没做）。
 
 **条目在提议之后被人改过**（`base_revision` 落后）：和 `spec.md` 第 5 节一样，要人看过合并结果再接受。
 
@@ -134,11 +150,11 @@ Accepted-by: <审核的人>
   | --- | --- |
   | `items` | 条目索引：id、范围、类型、地位、标题、正文、属性、状态、版本号、所在文件、最后的提交 |
   | `item_versions` | 版本号对应的提交和内容哈希 |
-  | `proposals` | 同 `spec.md` 3.4 |
+  | `proposals` | 提议 id（`prop_` 加 ULID）、动作、目标条目和当时的版本号、范围、类型、标题、正文、标签、复核日期、理由、证据、找到的矛盾（JSON）、内容哈希（`open` 的唯一）、抹了几处、提议的令牌和名字和岗位、状态（`open`、`accepted`、`rejected`）、提的时间、处理的时间和人和备注、写成的条目和提交 |
   | `changes` | 全局递增序号、条目 id、范围、版本号、提交、时间 |
   | `tokens` | 令牌 id（`tok_` 加 ULID）、名字、令牌的 SHA-256、岗位、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。第 3 步只有给 agent 的令牌；审核的人的令牌第 5 步加 |
   | `usage` | 每条被放进上下文包、被 `read` 的次数，按岗位记 |
-  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销 |
+  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝 |
 
 - **行级安全**（还没做）：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。第 3 步服务读 `items`、`item_versions`、`changes` 时只在代码里过滤（`context_read`、`context_changes` 按令牌的范围，测试里核对了越权读和不存在回答一样）。
 - **迁移**：sqlx 的迁移文件（`crates/tcms-store/migrations/`），连接时自动跑。第一版用运行时查询（`sqlx::query`），每条 SQL 都由连真 PostgreSQL 的集成测试覆盖；以后表多了再考虑换成编译期检查的 `query!` 宏。批量写入用 `UNNEST`，一条语句写一批。
@@ -163,7 +179,7 @@ Accepted-by: <审核的人>
 
 **接口**
 
-- MCP（rmcp，`crates/tcms-mcp`）：`spec.md` 6.1 的工具。第 3 步有 `context_get`、`context_search`、`context_read`、`context_changes`，`context_propose` 第 4 步和提议一起做。资源 `ctx://item/<id>`、`ctx://changes` 还没做。
+- MCP（rmcp，`crates/tcms-mcp`）：`spec.md` 6.1 的工具。第 3 步有 `context_get`、`context_search`、`context_read`、`context_changes`，第 4 步加了 `context_propose`（标成不是只读、没有破坏性、重复调用结果一样）。资源 `ctx://item/<id>`、`ctx://changes` 还没做。
   - stdio（`tcms serve --stdio`）给同机、由 agent 启动的进程：令牌从环境变量 `TCMS_TOKEN` 读，启动时核对一次，以后每次调用再核对（吊销马上生效）；标准输出只放协议消息，提示写标准错误。
   - Streamable HTTP（`tcms serve`，默认 `127.0.0.1:7341`，`/mcp`）给远程的：每个请求带 `Authorization: Bearer <令牌>`，没带或不认时直接回 401，进不了 MCP；不发会话 id，直接回 JSON，不开 SSE。默认只接受 `Host` 是本机的请求（防 DNS 重绑定），对外提供时用 `--allowed-host` 加上域名。`/healthz` 不要令牌。收到 Ctrl-C 或 SIGTERM 时不再接新连接，做完手上的请求再退出。
   - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
@@ -204,11 +220,13 @@ Accepted-by: <审核的人>
 | YAML | serde-saphyr 2（I.P. 也用它） | MIT 或 Apache-2.0 |
 | 条目 id | ulid 3 | MIT |
 | 内容哈希 | sha2 0.11 | MIT 或 Apache-2.0 |
+| 脱敏 | regex 1 | MIT 或 Apache-2.0 |
+| 审核时的差异 | similar 2 | Apache-2.0 |
 | 命令行 | clap 4 | MIT 或 Apache-2.0 |
 
 | 以后：Yjs | yrs 0.28 | MIT |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 
@@ -228,13 +246,15 @@ Accepted-by: <审核的人>
 | `context_get` 经过 stdio 一次往返（`tcms serve --stdio` 子进程，含核对令牌） | p95 < 30 毫秒 | 中位数 8.0 毫秒，p95 10.0 毫秒 |
 | `context_search` 经过 stdio 一次往返 | p95 < 15 毫秒 | 中位数 0.9 毫秒，p95 1.6 毫秒 |
 | 核对一次令牌（查 PostgreSQL） | p95 < 5 毫秒 | 中位数 0.13 毫秒，p95 0.17 毫秒 |
+| `context_propose` 经过 stdio 一次往返（检查、找矛盾、写进 PostgreSQL） | p95 < 15 毫秒 | 中位数 1.4 毫秒，p95 2.1 毫秒 |
+| 批准一条（排队、索引带到 HEAD、改文件、提交、增量索引；1 万条） | p95 < 250 毫秒 | 中位数 30 毫秒，p95 35 毫秒 |
 | 服务启动（取条目、建索引、握手） | 不设 | 约 0.3 秒 |
 | 加一个文件、`tcms reindex`，到服务里搜得到（整份重建） | < 2 秒 | 约 0.3 到 0.4 秒（其中 reindex 约 25 毫秒） |
 | 服务处理过请求以后的物理内存（1 万条） | 不设 | 约 55 到 61 MB |
 | 换过 5 次索引以后的物理内存（1 万条） | < 160 MB | 约 85 到 96 MB（修之前约 220 MB，还在涨） |
 | 空闲时内存 | < 50 MB | 没达到，见下面 |
 
-`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项，CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
+`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
 
 “空闲时内存 < 50 MB”是给第 3 步的常驻服务定的，**1 万条时没达到**：处理过请求以后约 55 到 61 MB，换过几次索引以后约 76 到 97 MB（重建时新旧两份同时在，放掉以后内存留在进程里给下一次用）。其中约 14 MB 是程序本身映射进来的代码，条目加检索索引约 26 到 33 MB。试过的：
 

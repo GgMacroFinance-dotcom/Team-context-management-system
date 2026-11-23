@@ -179,6 +179,7 @@ async fn tools_over_a_stream() {
         [
             "context_changes",
             "context_get",
+            "context_propose",
             "context_read",
             "context_search"
         ]
@@ -312,7 +313,7 @@ async fn tools_over_a_stream() {
     // 不认识的工具是协议错误。
     assert!(
         client
-            .call_tool(CallToolRequestParams::new("context_propose"))
+            .call_tool(CallToolRequestParams::new("context_nope"))
             .await
             .is_err()
     );
@@ -401,6 +402,78 @@ async fn follows_reindex_through_notify() {
     // 没有新变更时不重建。
     assert!(f.live.refresh().await.unwrap().is_none());
     follow.abort();
+    f.store.drop_schema().await.unwrap();
+}
+
+/// agent 提议 → 批准以前不生效 → 人批准、写进 git → 服务换上新索引以后 agent 看得到。
+#[tokio::test]
+async fn propose_then_accept() {
+    let Some(f) = fixture().await else { return };
+    let client = connect_stream(&f.live, &f.macro_token).await;
+    let propose = json!({
+        "action": "create",
+        "draft": {"title": "PMI 用制造业的", "body": "PMI 默认指制造业 PMI，非制造业的写明。", "kind": "fact", "tags": ["口径"]},
+        "reason": "两次周报把非制造业 PMI 当成了 PMI",
+        "evidence": [MACRO]
+    });
+    let r = call(&client, "context_propose", propose.clone()).await;
+    let p = ok(&r).clone();
+    assert_eq!(p["status"], "open");
+    assert_eq!(p["duplicate"], false);
+    assert_eq!(p["scope"], "role:macro");
+    let id = p["proposal_id"].as_str().unwrap().to_owned();
+    let item = p["result_item_id"].as_str().unwrap().to_owned();
+    // 同样的再提一次：返回原来那条。
+    let r = call(&client, "context_propose", propose).await;
+    assert_eq!(ok(&r)["proposal_id"], id.as_str());
+    assert_eq!(ok(&r)["duplicate"], true);
+
+    // 挡下的：规则、看不到的条目、不认识的参数。
+    let r = call(
+        &client,
+        "context_propose",
+        json!({"action": "update", "item_id": RULE, "draft": {"body": "x"}, "reason": "x"}),
+    )
+    .await;
+    assert!(err_text(&r).contains("规则只能人来改"));
+    let r = call(
+        &client,
+        "context_propose",
+        json!({"action": "archive", "item_id": DATA, "reason": "x"}),
+    )
+    .await;
+    assert_eq!(err_text(&r), format!("没有这一条：{DATA}"));
+    let r = call(
+        &client,
+        "context_propose",
+        json!({"action": "create", "reason": "x", "force": true}),
+    )
+    .await;
+    assert!(err_text(&r).starts_with("参数不对"));
+
+    // 批准以前不在包里、搜不到。
+    let r = call(&client, "context_search", json!({"query": "非制造业"})).await;
+    assert!(ids(ok(&r), "hits").is_empty());
+
+    // 人批准。
+    let accepted = tcms_write::accept(
+        &f.repo,
+        &f.store,
+        &id,
+        &tcms_write::AcceptOptions {
+            actor: "审核人".to_owned(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.item, item);
+    assert!(f.live.refresh().await.unwrap().is_some());
+    let r = call(&client, "context_search", json!({"query": "非制造业"})).await;
+    assert_eq!(ids(ok(&r), "hits"), std::slice::from_ref(&item));
+    let r = call(&client, "context_read", json!({"id": item})).await;
+    assert_eq!(ok(&r)["commit"], accepted.commit.as_str());
+    client.cancel().await.unwrap();
     f.store.drop_schema().await.unwrap();
 }
 

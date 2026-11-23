@@ -5,7 +5,9 @@
 //! - `context_get`、`context_search` 经过 stdio 的一次往返（含每次调用核对令牌）；
 //! - 令牌核对本身（查一次 PostgreSQL）；
 //! - 加一个文件、`tcms reindex` 以后，服务多久能搜到新内容（收到通知后整份重建）；
-//! - 子进程处理过请求以后的物理内存，换过 1 次和 5 次索引以后的（看重建会不会让内存越涨越多）。
+//! - 子进程处理过请求以后的物理内存，换过 1 次和 5 次索引以后的（看重建会不会让内存越涨越多）；
+//! - `context_propose` 经过 stdio 的一次往返（检查、找相近的条目、写进 PostgreSQL；量完马上拒掉，免得撞上每个令牌 20 条的上限）；
+//! - 批准一条（排队、把索引带到 HEAD、改文件、提交、增量索引）。
 
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -18,6 +20,7 @@ use serde_json::{Value, json};
 use tcms_core::ItemId;
 use tcms_git::{Author, ContextRepo, FileEdit};
 use tcms_store::{ALL_PROJECTS, NewToken, Store};
+use tcms_write::AcceptOptions;
 use tokio::io::AsyncReadExt;
 
 use super::data::{Gen, make_repo};
@@ -37,6 +40,12 @@ const SWAPS: usize = 5;
 const RSS_LIMIT_MB: u64 = 160;
 /// 新内容里的词，别的条目里没有。
 const MARKER: &str = "benchswapmarker";
+/// `context_propose` 经过 stdio 一次往返的 p95 门槛。
+const PROPOSE_P95_LIMIT: Duration = Duration::from_millis(15);
+/// 批准一条的 p95 门槛（1 万条）。
+const ACCEPT_P95_LIMIT: Duration = Duration::from_millis(250);
+/// 量几次批准。要比每个令牌没处理的提议上限（20）少。
+const ACCEPTS: usize = 10;
 
 pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> Result<ExitCode> {
     ensure!(items > 0 && requests > 0, "条数和次数都要大于 0");
@@ -51,7 +60,7 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
     let m = result?;
 
     println!(
-        "服务的基准：{items} 条、{files} 个文件，tcms serve --stdio 子进程，context_get（预算 {budget} token）、context_search、令牌核对各 {requests} 次"
+        "服务的基准：{items} 条、{files} 个文件，tcms serve --stdio 子进程，context_get（预算 {budget} token）、context_search、令牌核对、context_propose 各 {requests} 次，批准 {ACCEPTS} 次"
     );
     println!(
         "  启动（取条目、建索引、握手）        {:>8.1} 毫秒",
@@ -68,6 +77,8 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
     row("context_get 往返  ", &m.get, GET_P95_LIMIT);
     row("context_search 往返", &m.search, SEARCH_P95_LIMIT);
     row("核对令牌          ", &m.identify, IDENTIFY_P95_LIMIT);
+    row("context_propose 往返", &m.propose, PROPOSE_P95_LIMIT);
+    row("批准一条          ", &m.accept, ACCEPT_P95_LIMIT);
     println!(
         "  加一个文件到服务里搜得到            {:>8.1} 毫秒（其中 tcms reindex {:.1} 毫秒）   门槛 {:.0} 毫秒",
         ms(m.swap),
@@ -86,6 +97,8 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
         (m.get.p95 > GET_P95_LIMIT, "context_get 往返"),
         (m.search.p95 > SEARCH_P95_LIMIT, "context_search 往返"),
         (m.identify.p95 > IDENTIFY_P95_LIMIT, "核对令牌"),
+        (m.propose.p95 > PROPOSE_P95_LIMIT, "context_propose 往返"),
+        (m.accept.p95 > ACCEPT_P95_LIMIT, "批准一条"),
         (m.swap > SWAP_LIMIT, "换上新索引"),
         (
             m.rss_swapped_all.is_some_and(|kb| kb > RSS_LIMIT_MB * 1024),
@@ -116,6 +129,8 @@ struct Measured {
     get: Percentiles,
     search: Percentiles,
     identify: Percentiles,
+    propose: Percentiles,
+    accept: Percentiles,
     reindex: Duration,
     swap: Duration,
     rss_served: Option<u64>,
@@ -293,6 +308,41 @@ async fn measure(
         rss_swapped.push(pid.and_then(|p| rss_kb(Some(p))));
     }
 
+    // 提议：量完一条马上拒掉，留下 ACCEPTS 条量批准。
+    let mut propose = Vec::with_capacity(requests);
+    let mut kept = Vec::with_capacity(ACCEPTS);
+    for i in 0..requests {
+        let (t_len, b_len) = (gen_.rng.range(4, 12), gen_.rng.range(20, 80));
+        let args = json!({
+            "action": "create",
+            "draft": {"title": format!("提议 {i} {}", gen_.text(t_len)), "body": gen_.text(b_len), "kind": "fact"},
+            "reason": "基准",
+        });
+        let t = Instant::now();
+        let v = call(&client, "context_propose", args).await?;
+        propose.push(t.elapsed());
+        let id = v["proposal_id"]
+            .as_str()
+            .context("context_propose 的结果不对")?
+            .to_owned();
+        if kept.len() < ACCEPTS {
+            kept.push(id);
+        } else {
+            tcms_write::reject(store, &id, "bench", None).await?;
+        }
+    }
+    let opts = AcceptOptions {
+        actor: "bench".to_owned(),
+        ..Default::default()
+    };
+    let mut accept = Vec::with_capacity(kept.len());
+    for id in &kept {
+        let t = Instant::now();
+        let a = tcms_write::accept(repo, store, id, &opts).await?;
+        accept.push(t.elapsed());
+        ensure!(!a.already_applied, "批准的结果不对");
+    }
+
     client.cancel().await.context("断开 MCP")?;
     if tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await
@@ -306,6 +356,8 @@ async fn measure(
         get: percentiles(get),
         search: percentiles(search),
         identify: percentiles(identify),
+        propose: percentiles(propose),
+        accept: percentiles(accept),
         reindex,
         swap: swaps[0],
         rss_served,

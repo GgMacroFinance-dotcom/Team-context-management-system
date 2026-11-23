@@ -1,6 +1,6 @@
 //! MCP 服务端（`docs/spec.md` 6.1，`docs/architecture.md` 第 7 节）。
 //!
-//! 工具：`context_get`、`context_search`、`context_read`、`context_changes`（`context_propose` 在第 4 步）。
+//! 工具：`context_get`、`context_search`、`context_read`、`context_changes`，和写的 `context_propose`（只记下提议）。
 //! 接法：stdio（同机的 agent）和 Streamable HTTP（`/mcp`）。调用者是谁、能看哪些范围，由令牌决定。
 
 mod live;

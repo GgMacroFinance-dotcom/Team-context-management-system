@@ -39,12 +39,13 @@ pub enum What {
         #[arg(long)]
         check: bool,
     },
-    /// 服务：起一个真的 `tcms serve --stdio` 子进程，用 MCP 客户端量往返、令牌核对、换上新索引的时间和空闲时的内存。
+    /// 服务：起一个真的 `tcms serve --stdio` 子进程，用 MCP 客户端量往返、令牌核对、换上新索引的时间和空闲时的内存，
+    /// 再量提议的往返和批准一条的时间。
     Serve {
         /// 造多少条。
         #[arg(long, default_value_t = 10_000)]
         items: usize,
-        /// context_get、context_search、令牌核对各跑多少次。
+        /// context_get、context_search、令牌核对、context_propose 各跑多少次。
         #[arg(long, default_value_t = 300)]
         requests: usize,
         /// 每个包的 token 预算。
