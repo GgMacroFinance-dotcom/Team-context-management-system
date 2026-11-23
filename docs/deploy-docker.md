@@ -1,6 +1,6 @@
 # 用 Docker 部署
 
-> 镜像里只有 `tcms` 和 git，用 `Dockerfile` 在仓库根目录构建。
+> 镜像里只有 `tcms`、git 和 ssh 客户端，用 `Dockerfile` 在仓库根目录构建。
 > 和 I.P. 一起部署时不用这里的 compose：I.P. 仓库的 `rust/docker-compose.yml` 里有 `tcms` 服务，和 I.P. 共用一个 PostgreSQL，步骤见 I.P. 的 `docs/ip/deploy-docker.md`“团队上下文”。
 > 这里讲单独部署，用 `deploy/docker-compose.yml`（一个 PostgreSQL 加 tcms）。
 
@@ -16,7 +16,7 @@ docker build -t tcms .
 
 入口脚本 `deploy/docker-entrypoint.sh` 做三件事：
 
-1. 上下文仓库是空目录时先 `git init`。
+1. 上下文仓库是空目录时先 `git init`，分支叫 `main`。
 2. 运行 `serve`（默认命令）时先 `tcms reindex`，把仓库的 HEAD 同步进 PostgreSQL，再起服务。
 3. 别的子命令原样交给 `tcms`，比如 `docker run ... tcms token add ...`。
 
@@ -30,6 +30,11 @@ docker build -t tcms .
 | `TCMS_LISTEN` | 监听地址，镜像里默认 `0.0.0.0:7341`。健康检查跟着它的端口走 |
 | `TCMS_ALLOWED_HOSTS` | 除了本机以外还接受的 `Host`，逗号隔开。别的容器用服务名连时写服务名，比如 `tcms`；对外提供时写域名 |
 | `TCMS_GIT_EMAIL` | 审核页批准提议时提交者的邮箱，名字是登录的人 |
+| `TCMS_REMOTE` | 可选，上下文仓库的 git 远端：地址，或者仓库里配好的远端名。见“推到自己的 git 远端” |
+| `TCMS_REMOTE_BRANCH` | 远端的分支，默认和本地同名（新卷是 `main`） |
+| `TCMS_GIT_TOKEN` | https 远端的令牌。只放在这里，不要写进地址 |
+| `TCMS_GIT_USERNAME` | 和令牌一起用的用户名，默认 `x-access-token`（GitHub）；Gitea、GitLab 写自己的用户名 |
+| `TCMS_SYNC_SECS` | 多久和远端同步一次，默认 60 秒；0 是只在批准、改单条时同步 |
 
 ## 单独部署
 
@@ -94,7 +99,50 @@ sudo chown -R 10002:10002 ./context
 
 人直接在仓库里改了、提交以后，运行 `docker compose run --rm tcms reindex`，或者重启 tcms（启动时会同步一次）。
 
-`teams.yaml`（团队有哪些岗位）现在只能这样直接提交进仓库，导入和提议都不管它。
+`teams.yaml`（团队有哪些岗位）现在只能这样直接提交进仓库（或者推到下一节的远端），导入和提议都不管它。
+
+## 推到自己的 git 远端
+
+配了远端以后，批准、审核页改单条、导入、补 id 都是提交之前先拉、提交以后推；服务每 60 秒再同步一次，人推到远端的改动就这样进来、进索引。规则见 `spec.md` 6.5。
+
+1. 在 GitHub、Gitea 上建一个仓库，空的或者已经放了上下文都行。
+2. 发一个只对这个仓库有读写权限的令牌：GitHub 用 fine-grained token，权限给 Contents 读写；Gitea 用 Access Token，给 repository 读写。在 `.env` 里写：
+
+   ```bash
+   TCMS_REMOTE=https://github.com/<组织>/<仓库>.git
+   TCMS_GIT_TOKEN=<令牌>
+   # Gitea、GitLab 还要写用户名：
+   # TCMS_GIT_USERNAME=<用户名>
+   ```
+
+   令牌不要写进地址（`https://<令牌>@…`），日志里会把地址里的用户名、密码换成 `***`，但放在 `TCMS_GIT_TOKEN` 里它才不会出现在 git 的命令行参数和仓库配置里。
+
+   用 ssh 也行：远端写 `git@github.com:<组织>/<仓库>.git`，把部署密钥和 `known_hosts` 挂进容器，在 `docker-compose.override.yml` 里给 tcms 加 `GIT_SSH_COMMAND: ssh -i /run/secrets/deploy_key -o UserKnownHostsFile=/run/secrets/known_hosts -o BatchMode=yes`。私钥文件的属主要是 uid 10002、权限 600。
+
+3. 重新起 tcms：`docker compose up -d`。日志里有一行“远端 …：每 60 秒同步一次”，启动后马上同步一次：
+   - 卷里的仓库是空的、远端有内容：把远端的内容拉进来，建好索引。
+   - 卷里有提交、远端是空的：推上去。
+   - 两边都有提交但历史不相干（各自 `git init` 的）：git 不合并不相干的历史，日志里一直报错，批准照样在本地提交但推不上去。先定以哪边为准，换一个空的远端，或者清空卷从远端拉。
+4. 手动同步一次、看结果：
+
+   ```bash
+   docker compose exec tcms tcms sync
+   docker compose logs tcms | grep 远端
+   ```
+
+**人怎么改**：克隆远端，改 Markdown，提交，推到 `main`。最多等一个同步间隔，服务拉下来、更新索引，运行中的检索索引跟着换。新写的标题还没有 id 时不进索引，在自己的克隆里跑一次 `tcms assign-ids` 再推，或者 `docker compose exec tcms tcms assign-ids`。
+
+**合并不了时**（服务器批准了一条，同时有人在远端改了同一处）：
+- 服务把服务器这边的提交推到远端的旁支 `tcms/main-unmerged`。日志、`tcms sync` 和审核页上批准时的回答都会写明哪些文件冲突。
+- 在自己的克隆里合并它，推回 `main`，下次同步服务器就快进过去：
+
+  ```bash
+  git fetch origin tcms/main-unmerged
+  git merge FETCH_HEAD        # 解决冲突，git add，git commit
+  git push origin main
+  ```
+
+- 合并好之前，审核页上的批准、改单条会停下来，回答“合并不了”，提议还是待审核。
 
 ## 日常维护
 
@@ -112,7 +160,7 @@ git pull && docker compose up -d --build
   docker compose exec -T postgres pg_dump -U tcms -d tcms -n tcms -Fc > tcms-$(date +%F).dump
   ```
 
-- 上下文仓库是真相，打一个 git bundle：
+- 上下文仓库是真相。配了远端时，远端就是一份异地备份；没配时打一个 git bundle：
 
   ```bash
   docker compose exec -T tcms git -C /var/lib/tcms/context bundle create - --all > context-$(date +%F).bundle
@@ -120,7 +168,7 @@ git pull && docker compose up -d --build
 
   索引丢了可以从仓库重建：`tcms reindex --full`。
 
-**还没有的**：批准以后推送到远端（客户自己的 GitHub、Gitea），现在只提交在卷里的仓库。
+**还没有的**：远端的 webhook（推上去马上同步，现在最多等一个同步间隔）；人推上去的新条目自动补 id；审核页上显示远端的状态。
 
 ## 实测结果
 
@@ -139,4 +187,14 @@ git pull && docker compose up -d --build
 | 别的 `Host` | 审核页 403；`Host: tcms`（写进了 `TCMS_ALLOWED_HOSTS`）能连 |
 | `docker compose stop tcms` | 退出码 0，日志最后一行“已停止” |
 
-没测的：放在 HTTPS 反向代理后面让别的机器连 `/mcp`；从旧版本升级（还没有发过版本）。
+推到远端（2026-11-23，同一台机器，镜像 324 MB，多了 ssh 客户端）。远端是本机起的一个带 Basic 认证的 git 服务（`git http-backend` 外面包一层，只认一个用户名和令牌），不是真的 GitHub、Gitea：
+
+| 测了什么 | 结果 |
+| --- | --- |
+| 空卷、远端已经有 2 条 | 启动后第一次同步快进到远端的提交，`tcms search` 搜得到 |
+| `tcms import`（另起一个容器） | 导入的提交推到了远端；服务下一次同步时索引跟着更新 |
+| 人在自己的克隆里改了一条、推上去 | 3 秒（`TCMS_SYNC_SECS=3`）内服务快进过去，检索到新内容 |
+| 服务器上的提交和人推的改动改了同一行 | 日志写一次“合并不了”和冲突的文件，远端多了 `tcms/main-unmerged`；人在克隆里合并它、推到 `main` 以后，服务快进过去，合并后的内容进了索引 |
+| 没给令牌、令牌不对（在容器外用 `tcms` 跑的） | 马上失败（“terminal prompts disabled”“Authentication failed”），不卡住等密码；导入照样在本地提交 |
+
+没测的：放在 HTTPS 反向代理后面让别的机器连 `/mcp`；从旧版本升级（还没有发过版本）；真的 GitHub、Gitea；ssh 远端。

@@ -10,7 +10,9 @@ if [ ! -e "$repo/.git" ]; then
     echo "上下文仓库 $repo 里有文件但不是 git 仓库；先在主机上 git init 并提交，或者换一个空目录" >&2
     exit 1
   fi
-  git init -q "$repo"
+  # 分支叫 main，和 GitHub、Gitea 新建仓库的默认分支一样，配远端时不用另写 TCMS_REMOTE_BRANCH。
+  # 配了远端时，服务启动后第一次同步就把远端的内容拉进来。
+  git init -q -b main "$repo"
   echo "上下文仓库 $repo 是空的，已 git init" >&2
 fi
 

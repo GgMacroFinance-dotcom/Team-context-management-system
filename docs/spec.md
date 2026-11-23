@@ -171,7 +171,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 ### 6.2 命令行
 
-`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals [<id>] [--status open|accepted|rejected|all]`（列表；写 id 时看一条：理由、证据、相近的条目、批准以后的差异）、`tcms accept <id> [--title] [--body-file] [--file] [--over N] [--note]`、`tcms reject <id> [--note]`、`tcms review-due [--within N]`（复核日期到了的生效条目，往后 N 天到期的也可以列）、`tcms token add|list|revoke`（给 agent 发令牌，`--reviewer` 发给审核的人；明文只显示一次）、`tcms serve [--stdio]`、`tcms bench`。
+`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals [<id>] [--status open|accepted|rejected|all]`（列表；写 id 时看一条：理由、证据、相近的条目、批准以后的差异）、`tcms accept <id> [--title] [--body-file] [--file] [--over N] [--note]`、`tcms reject <id> [--note]`、`tcms review-due [--within N]`（复核日期到了的生效条目，往后 N 天到期的也可以列）、`tcms token add|list|revoke`（给 agent 发令牌，`--reviewer` 发给审核的人；明文只显示一次）、`tcms serve [--stdio] [--sync-secs N]`、`tcms sync`（和远端同步一次，见 6.5）、`tcms bench`。
 
 ### 6.3 Markdown 和导入
 
@@ -189,7 +189,25 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 - 待复核：复核日期到了的生效条目，日期早的在前，可以选往后 30、90 天内到期的。打开一条，看过以后改复核日期（或清空），保存。
 - 浏览：按范围、类型筛，带每个范围、类型的条数；可以全文检索（按全部范围）。一条显示元数据、正文、取代了谁、被谁取代。
 - 改单条：生效的条目可以改标题、标签、复核日期、正文，类型、范围不在这里改；人可以改规则。保存时写明打开时的版本号，期间被别人改过就停下来；没有改动、正文里有一级二级标题、日期不对都挡下。保存直接做成一个提交（提交者是审核的人，提交信息带 `Item:`、`Edited-by:`），和批准提议排同一个队。
-- 做成一个提交以后，页面在标题下面显示写进了哪个文件、哪个提交。
+- 做成一个提交以后，页面在标题下面显示写进了哪个文件、哪个提交；配了远端时再说一句推没推上去。
+
+### 6.5 推到远端
+
+上下文仓库可以配一个客户自己的 git 远端（GitHub、Gitea 等）。远端是一份异地备份，也是人直接改条目的地方：会用 git 的人克隆下来改、推上去，服务拉回来进索引。做法（2026-11-23）：
+
+- 配置只从环境变量读：`TCMS_REMOTE`（仓库里配好的远端名，如 `origin`，或者远端地址）、`TCMS_REMOTE_BRANCH`（远端的分支，默认和本地当前分支同名）。https 远端的令牌放在 `TCMS_GIT_TOKEN`，用户名默认 `x-access-token`（GitHub），Gitea、GitLab 用 `TCMS_GIT_USERNAME` 写自己的；令牌不写进远端地址、不写进仓库的 git 配置。ssh 远端用部署者自己配的密钥。不配 `TCMS_REMOTE` 时和以前一样，只提交在本地。
+- 什么时候同步：
+  - 批准提议、在审核页改单条：排进提交队列以后先拉，再照着拉完的 HEAD 改、提交，记下以后推上去。
+  - `tcms import`、`tcms assign-ids`：提交之前先拉，提交以后推。
+  - `tcms serve`（HTTP）每 `TCMS_SYNC_SECS` 秒（默认 60，0 是不定时同步）同步一次，启动时马上同步一次；`tcms sync` 手动同步一次。同步也排进提交队列：拉、把索引带到 HEAD、推。人推到远端的改动就是这样进索引的。
+- 拉：本地落后就快进；两边都有新提交就合并，做一个合并提交，提交者是批准的人（定时同步时是 `tcms`）；改到了同一处、合并不了时，放弃合并，本地什么都不改。
+- 合并不了时：
+  - 服务器这边的 HEAD 推到远端的旁支 `tcms/<分支>-unmerged`（只有 tcms 写它，每次覆盖成服务器现在的 HEAD）。人在自己的克隆里 `git fetch <远端> tcms/<分支>-unmerged`、`git merge FETCH_HEAD`、解决冲突、推到那个分支；服务器下次同步时快进过去，之后照常。旁支推不上去时，只能在服务器的上下文仓库里 `git merge FETCH_HEAD`（tcms 刚取回来的远端提交）、解决冲突、提交。
+  - 在这之前，批准、改单条停下来：审核页回 409，`code` 是 `needs_merge`，写明哪些文件、怎么合并；提议还是待审核。定时同步在日志里写一次（同一个错不每次都写），`tcms sync` 退出码不是 0。
+- 推：把本地 HEAD 推到远端的那个分支，不强推。推不上去（连不上、远端有本地没有的提交）不算批准失败，接受照样记下，结果里写明没推上去，下次同步时再推。
+- 拉不下来（连不上、超时、认证失败）时，批准照样在本地提交。
+- git 命令有时限（网络 120 秒、本地 60 秒），不弹密码提示、ssh 不问主机密钥，不跑仓库里的钩子、不签名。出错信息里地址带的用户名、密码换成 `***`。
+- 还没做：远端的 webhook（推上去马上同步，现在最多等一个同步间隔）；人推上去的新条目没有 id 时自动补（现在要跑 `tcms assign-ids`）；审核页上显示远端的状态。
 
 ## 7. I.P. 怎么接
 
@@ -235,7 +253,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | 1 ✓ | Cargo 工作区；上下文仓库的格式解析（comrak）；用 gix 读提交和改动的文件；PostgreSQL 迁移和条目索引（sqlx）；`tcms reindex`、`tcms import`、`tcms assign-ids`、`tcms bench index`。**已做（2026-11-22）**，只在本地 PostgreSQL 16 和测试里跑过，没接真实团队的资料 | 单元测试；CI 起一个 PostgreSQL 服务容器；同一个仓库索引两遍结果相同 |
 | 2 ✓ | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms search`、`tcms bench read`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和造出来的基准数据上跑过，没接真实团队的资料 | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
 | 3 ✓ | MCP 服务端：四个读的工具（`context_propose` 挪到第 4 步），stdio 和 HTTP，令牌定范围；`tcms token`、`tcms serve`、`tcms bench serve`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端）和造出来的基准数据上跑过，没接真实的 agent | 用 MCP 客户端测；越权读回答和不存在一样 |
-| 4 ✓ | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议、`context_propose`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端，4 个进程同时批准 12 条）和造出来的基准数据上跑过，没接真实的 agent；还不推送到远端 | 单元测试；并发批准不丢提交 |
+| 4 ✓ | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议、`context_propose`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端，4 个进程同时批准 12 条）和造出来的基准数据上跑过，没接真实的 agent。推送到远端在第 7 步之后补上（6.5） | 单元测试；并发批准不丢提交 |
 | 5 ✓ | 审核页（在 `tcms serve` 里）、审核的人的令牌、改单条、`tcms review-due`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和无头 Chromium（Playwright 脚本 `scripts/review-walk.js` 对着 `scripts/review-demo.sh` 造的数据点了一遍，21 项）上跑过，没有真人用过 | 浏览器里点一遍 |
 | 6 ✓ | I.P. 接入（在 I.P. 主仓库开 PR）。**已做（2026-11-23，`Intelligent-Position-release` PR #58）**：每个岗位用自己的令牌配一项 MCP 服务器，每轮开头调 `context_get`，固定前缀放进系统提示词（组织规则之后），按任务挑的部分放在对话开头、同一个对话不换；员工用 `context_search`、`context_read`、`context_propose`，`context_get`、`context_changes` 不给模型；本系统出错时那一轮不带、照常进行。接法见 I.P. 仓库的 `docs/ip/team-context.md`。先用假模型测过（本系统用测试里的假服务和本机起的真实 `tcms serve`），真实模型在第 7 步跑了。还没在 Docker 部署里和 I.P. 一起跑 | 先假模型，再真实模型 |
 | 7 ✓ | 评测：一批必须用到团队上下文才能答对的问题，比较接上前后。**已做（2026-11-23，`Intelligent-Position-release` PR #59）**：10 道造的题、15 条造的条目，比较不接、接上（预算 4000 token）、小预算（只列标题）三种配置，I.P. 连本机起的真实 `tcms serve`。维护者定的范围是 `gpt-6-luna` 加 `gpt-6-astra` 对比、上限 10 美元，实际约 0.48 美元。luna 不接 0/30、接上 30/30、小预算 30/30；astra 不接 1/10（判分误判）、接上 10/10、小预算 10/10。小预算时问按任务挑的条目的题，员工每次都自己调了 `context_search`。题目答案几乎是条目原话，只说明链路通了，不说明真实工作里帮了多少；条目少，BM25 够用，还看不出要不要向量检索；`context_propose` 没测。记录在 I.P. 仓库的 `docs/ip/evals/2026-11-23-team-context/` | 真实模型，要花费用，开工前问维护者 |

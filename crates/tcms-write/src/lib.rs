@@ -5,17 +5,20 @@
 //!   条目在提议之后被人改过就停下来要人看过，再改文件、提交、索引。
 //! - [`proposal_diff`]：给审核的人看批准以后差在哪里。
 //! - [`edit_item`]：人在审核页里改单条的纯文本，和批准排在同一个提交队列里。
+//! - [`sync`]：和上下文仓库的远端同步（拉、索引、推）。批准和改单条配了远端时也会先拉、后推。
 
 mod accept;
 mod conflicts;
 mod edit_item;
 mod propose;
 mod review;
+mod sync;
 
 pub use accept::{AcceptOptions, Accepted, WriteError, accept, default_path, reject};
 pub use conflicts::{Conflict, find_conflicts};
-pub use edit_item::{Edited, ItemEdit, edit_item};
+pub use edit_item::{Committer, Edited, ItemEdit, edit_item};
 pub use propose::{
     Draft, MAX_OPEN_PER_AGENT, Proposal, ProposeArgs, ProposeError, item_id_of, propose, reach,
 };
 pub use review::{DiffLine, diff, item_text, proposal_diff};
+pub use sync::{RemoteReport, sync};

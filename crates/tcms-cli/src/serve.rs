@@ -4,12 +4,16 @@
 //! 默认是 Streamable HTTP：`/mcp`（每个请求带 agent 的令牌）和审核页 `/review`（审核的人用自己的令牌登录）；
 //! `--stdio` 时只有 MCP，走标准输入输出，令牌从 TCMS_TOKEN 读。
 //! 两种都只往标准错误写提示，stdio 时标准输出只有协议消息。
+//! 配了远端（`TCMS_REMOTE`）时，HTTP 服务每隔 `--sync-secs` 秒和远端同步一次（拉、索引、推），
+//! 交给写入线程做，和批准排同一个队；stdio 时不同步。
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use tcms_git::{Author, Remote};
 use tcms_mcp::{HttpOptions, Live};
 use tcms_review::{ReviewOptions, Writer};
 use tcms_store::Store;
@@ -20,6 +24,10 @@ pub struct ServeArgs {
     pub allowed_hosts: Vec<String>,
     /// 上下文仓库（审核页批准、改单条时写）。
     pub repo: PathBuf,
+    /// 上下文仓库的远端。
+    pub remote: Option<Remote>,
+    /// 多久和远端同步一次，0 是不定时同步。
+    pub sync_every: Duration,
 }
 
 pub async fn run(store: Store, args: ServeArgs) -> Result<()> {
@@ -74,7 +82,23 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
             args.repo.display()
         );
     }
-    let writer = Writer::spawn(live.store(), args.repo.clone()).context("起写入线程")?;
+    let writer = Writer::spawn(live.store(), args.repo.clone(), args.remote.clone())
+        .context("起写入线程")?;
+    let sync = match &args.remote {
+        Some(remote) if !args.sync_every.is_zero() => {
+            eprintln!(
+                "远端 {}：每 {} 秒同步一次",
+                remote.display(),
+                args.sync_every.as_secs()
+            );
+            Some(tokio::spawn(sync_loop(writer.clone(), args.sync_every)))
+        }
+        Some(remote) => {
+            eprintln!("远端 {}：只在批准、改单条时同步", remote.display());
+            None
+        }
+        None => None,
+    };
     let app = tcms_mcp::router(
         live.clone(),
         HttpOptions {
@@ -97,11 +121,57 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
             "提醒：只接受 Host 是本机的请求；从别的机器用域名或 IP 连时，用 --allowed-host 写上它"
         );
     }
-    tcms_mcp::serve_http(listener, app, shutdown())
+    let served = tcms_mcp::serve_http(listener, app, shutdown())
         .await
-        .context("HTTP 服务")?;
+        .context("HTTP 服务");
+    if let Some(sync) = sync {
+        sync.abort();
+    }
+    served?;
     eprintln!("已停止");
     Ok(())
+}
+
+/// 定时和远端同步。启动时马上同步一次（空的上下文仓库这时取到远端的内容）。
+/// 只在有变化（拉到了新提交、推上去了）或者出错的情况变了时写日志，同一个错不每次都写。
+async fn sync_loop(writer: Writer, every: Duration) {
+    let author = Author {
+        name: "tcms".to_owned(),
+        email: std::env::var("TCMS_GIT_EMAIL")
+            .ok()
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| Author::default().email),
+    };
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_errors: Vec<String> = Vec::new();
+    loop {
+        tick.tick().await;
+        match writer.sync(author.clone()).await {
+            Ok(report) => {
+                let errors_changed = report.errors != last_errors;
+                if report.head_moved
+                    || report.pushed_new
+                    || (errors_changed && !report.errors.is_empty())
+                {
+                    eprintln!("{}", report.summary());
+                    if report.needs_merge && errors_changed {
+                        eprintln!("合并好之前，批准和改单条会停下来");
+                    }
+                } else if errors_changed {
+                    eprintln!("和远端同步恢复正常");
+                }
+                last_errors = report.errors;
+            }
+            Err(e) => {
+                let errors = vec![format!("和远端同步失败：{e}")];
+                if errors != last_errors {
+                    eprintln!("{}", errors[0]);
+                }
+                last_errors = errors;
+            }
+        }
+    }
 }
 
 fn report(live: &Live) {

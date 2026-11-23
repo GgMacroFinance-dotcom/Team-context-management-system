@@ -14,8 +14,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use tcms_core::{Kind, Warning, assign_ids, scope_of_path};
-use tcms_git::{Author, ContextRepo, FileEdit};
+use tcms_git::{Author, ContextRepo, FileEdit, Remote, RemoteError};
 use tcms_store::Store;
+use tcms_write::RemoteReport;
 
 #[derive(Parser)]
 #[command(name = "tcms", version, about = "面向 agent 的团队上下文系统")]
@@ -27,6 +28,15 @@ struct Cli {
     /// PostgreSQL 里用的 schema。
     #[arg(long, env = "TCMS_SCHEMA", default_value = "tcms", global = true)]
     schema: String,
+
+    /// 上下文仓库的远端：仓库里配好的远端名（如 origin），或者地址。配了以后，批准、改单条、导入、补 id
+    /// 提交之前先拉、提交以后推。https 远端的令牌放在环境变量 TCMS_GIT_TOKEN。
+    #[arg(long, env = "TCMS_REMOTE", global = true)]
+    remote: Option<String>,
+
+    /// 推到远端的哪个分支。默认和本地当前分支同名。
+    #[arg(long, env = "TCMS_REMOTE_BRANCH", global = true)]
+    remote_branch: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -135,6 +145,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// 和远端同步一次：拉（快进或合并）、把索引带到 HEAD、推。要先配远端（--remote 或 TCMS_REMOTE）。
+    /// 有错（连不上、合并不了、推送被拒）时退出码不是 0。
+    Sync {
+        /// 用 JSON 输出。
+        #[arg(long)]
+        json: bool,
+    },
     /// 拒绝一条提议。
     Reject {
         /// 提议 id。
@@ -176,6 +193,9 @@ enum Command {
             value_delimiter = ','
         )]
         allowed_hosts: Vec<String>,
+        /// 配了远端时，每隔多少秒和远端同步一次（拉人推上去的改动、补推没推上去的提交）。0 是只在批准、改单条时同步。
+        #[arg(long, env = "TCMS_SYNC_SECS", default_value_t = 60)]
+        sync_secs: u64,
     },
     /// 性能基准。
     Bench {
@@ -197,6 +217,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
+    // 远端写错了（比如以 - 开头）时，哪个命令都先报出来。
+    let remote = remote(&cli)?;
     match cli.command {
         Command::Reindex { full, json } => {
             let repo = open_repo(&cli.repo)?;
@@ -228,12 +250,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::AssignIds => {
             let repo = open_repo(&cli.repo)?;
-            assign_ids_cmd(&repo)?;
+            pull_first(&repo, remote.as_ref()).await?;
+            if assign_ids_cmd(&repo)? {
+                push_after(&repo, remote.as_ref()).await;
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Import { src, into } => {
             let repo = open_repo(&cli.repo)?;
+            pull_first(&repo, remote.as_ref()).await?;
             import::run(&repo, &src, &into, &author())?;
+            push_after(&repo, remote.as_ref()).await;
             Ok(ExitCode::SUCCESS)
         }
         Command::Get {
@@ -306,6 +333,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             proposals::accept(
                 &repo,
                 &store,
+                remote,
                 proposals::AcceptArgs {
                     id,
                     title,
@@ -318,6 +346,24 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             )
             .await?;
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Sync { json } => {
+            let Some(remote) = remote else {
+                bail!("没有配远端：用 --remote 或环境变量 TCMS_REMOTE 写远端名（如 origin）或地址");
+            };
+            let repo = open_repo(&cli.repo)?;
+            let store = connect(&cli.schema).await?;
+            let report = tcms_write::sync(&repo, &store, &remote, &author()).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_remote(&report);
+            }
+            Ok(if report.errors.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         Command::Reject { id, note } => {
             let store = connect(&cli.schema).await?;
@@ -379,6 +425,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             stdio,
             listen,
             allowed_hosts,
+            sync_secs,
         } => {
             let store = connect(&cli.schema).await?;
             serve::run(
@@ -388,12 +435,72 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     listen,
                     allowed_hosts,
                     repo: cli.repo.clone(),
+                    remote,
+                    sync_every: std::time::Duration::from_secs(sync_secs),
                 },
             )
             .await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { what } => bench::run(what).await,
+    }
+}
+
+/// 配的远端。`TCMS_GIT_TOKEN` 设了（不是空的）就经凭据助手把它交给 git。
+fn remote(cli: &Cli) -> Result<Option<Remote>> {
+    let Some(target) = cli.remote.as_deref().filter(|t| !t.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let token = std::env::var_os("TCMS_GIT_TOKEN").is_some_and(|t| !t.is_empty());
+    Ok(Some(Remote::new(
+        target,
+        cli.remote_branch.as_deref(),
+        token,
+    )?))
+}
+
+/// 不经过提交队列的写（导入、补 id）之前先从远端拉。合并不了就停下；连不上只提醒，照样在本地提交。
+async fn pull_first(repo: &ContextRepo, remote: Option<&Remote>) -> Result<()> {
+    let Some(remote) = remote else {
+        return Ok(());
+    };
+    let dir = repo.workdir().context("上下文仓库没有工作区")?;
+    match remote.pull(dir, &author()).await {
+        Ok(p) if p.moved_head() => {
+            println!("先从远端 {} 拉了：{p}。", remote.display());
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(e @ RemoteError::NeedsMerge { .. }) => Err(e.into()),
+        Err(e) => {
+            eprintln!(
+                "提醒：从远端 {} 拉取失败（{e}），照样在本地提交",
+                remote.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// 提交以后推到远端。推不上去只提醒：提交在本地，`tcms sync` 或服务的定时同步会再推。
+async fn push_after(repo: &ContextRepo, remote: Option<&Remote>) {
+    let (Some(remote), Some(dir)) = (remote, repo.workdir()) else {
+        return;
+    };
+    match remote.push(dir).await {
+        Ok(p) => println!("远端 {}：{p}。", remote.display()),
+        Err(e) => eprintln!(
+            "提醒：推到远端 {} 失败（{e}）；提交在本地，运行 tcms sync 或等服务定时同步时再推",
+            remote.display()
+        ),
+    }
+}
+
+/// 打印和远端同步的结果。
+fn print_remote(report: &RemoteReport) {
+    println!("{}。", report.summary());
+    if report.needs_merge {
+        println!("合并好以后再运行 tcms sync。在这之前批准和改单条会停下来。");
     }
 }
 
@@ -452,10 +559,11 @@ fn print_warnings(warnings: &[Warning]) {
     }
 }
 
-fn assign_ids_cmd(repo: &ContextRepo) -> Result<()> {
+/// 补 id。做了提交时返回 `true`。
+fn assign_ids_cmd(repo: &ContextRepo) -> Result<bool> {
     let Some(head) = repo.head()? else {
         println!("仓库还没有提交，没有要补的。");
-        return Ok(());
+        return Ok(false);
     };
     let mut edits = Vec::new();
     let mut lines = Vec::new();
@@ -478,7 +586,7 @@ fn assign_ids_cmd(repo: &ContextRepo) -> Result<()> {
     }
     if edits.is_empty() {
         println!("所有条目都有 id 了。");
-        return Ok(());
+        return Ok(false);
     }
     let message = format!("补 id：{} 条\n\n{}\n", lines.len(), lines.join("\n"));
     let commit = repo.commit(&edits, &message, &author())?;
@@ -487,5 +595,5 @@ fn assign_ids_cmd(repo: &ContextRepo) -> Result<()> {
         println!("  {l}");
     }
     println!("接着运行 tcms reindex 更新索引。");
-    Ok(())
+    Ok(true)
 }

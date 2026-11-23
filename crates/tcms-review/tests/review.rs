@@ -12,7 +12,7 @@ use http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tcms_core::ItemId;
-use tcms_git::{Author, ContextRepo, FileEdit};
+use tcms_git::{Author, ContextRepo, FileEdit, Remote};
 use tcms_mcp::{HttpOptions, Live};
 use tcms_review::{ReviewOptions, Writer, router};
 use tcms_store::{Identity, NewToken, Store};
@@ -33,6 +33,7 @@ fn put(path: &str, text: &str) -> FileEdit {
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    writer: Writer,
     path: PathBuf,
     repo: ContextRepo,
     store: Store,
@@ -44,6 +45,11 @@ struct Fixture {
 }
 
 async fn fixture() -> Option<Fixture> {
+    fixture_with(|_| None).await
+}
+
+/// `remote` 拿到上下文仓库的路径，给写入线程配一个远端。
+async fn fixture_with(remote: impl FnOnce(&Path) -> Option<Remote>) -> Option<Fixture> {
     let Ok(url) = std::env::var("TCMS_TEST_DATABASE_URL") else {
         assert!(
             std::env::var_os("CI").is_none(),
@@ -99,10 +105,10 @@ async fn fixture() -> Option<Fixture> {
         .await
         .unwrap();
     let live = Live::load(store.clone()).await.unwrap();
-    let writer = Writer::spawn(&store, dir.path().to_owned()).unwrap();
+    let writer = Writer::spawn(&store, dir.path().to_owned(), remote(dir.path())).unwrap();
     let app = router(
         live.clone(),
-        writer,
+        writer.clone(),
         ReviewOptions {
             allowed_hosts: vec!["ctx.example.com".to_owned()],
             author_email: "review@example.com".to_owned(),
@@ -111,6 +117,7 @@ async fn fixture() -> Option<Fixture> {
     Some(Fixture {
         path: dir.path().to_owned(),
         _dir: dir,
+        writer,
         repo,
         store,
         live,
@@ -658,6 +665,142 @@ async fn due_browse_and_edit() {
     assert_eq!(
         (rule.kind.as_str(), rule.tags.clone()),
         ("rule", vec!["来源".to_owned()])
+    );
+
+    f.store.drop_schema().await.unwrap();
+}
+
+/// 测试里自己调 git：不签名、不跑钩子，提交者固定，和机器上的全局配置无关。
+fn git_as_human(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .args([
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(["-c", "user.name=人", "-c", "user.email=human@example.com"])
+        .args(["-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("运行 git")
+}
+
+fn human(dir: &Path, args: &[&str]) -> String {
+    let out = git_as_human(dir, args);
+    assert!(
+        out.status.success(),
+        "git {args:?}：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// 写入线程配了远端：接受、改单条的回答里带推送的结果；定时同步（Writer::sync）把人推的改动拉进来；
+/// 合并不了时接受回 409 needs_merge。
+#[tokio::test]
+async fn remote_push_and_needs_merge() {
+    let remote_dir = tempfile::tempdir().unwrap();
+    let bare = remote_dir.path().join("remote.git");
+    human(remote_dir.path(), &["init", "-q", "--bare", "remote.git"]);
+    let remote = Remote::new(bare.to_str().unwrap(), Some("main"), false).unwrap();
+    let Some(f) = fixture_with(|_| Some(remote.clone())).await else {
+        return;
+    };
+    let author = Author {
+        name: "tcms".into(),
+        email: "tcms@localhost".into(),
+    };
+
+    // 第一次同步：推上去。
+    let r = f.writer.sync(author.clone()).await.unwrap();
+    assert!(r.errors.is_empty() && r.pushed_new, "{r:?}");
+
+    // 接受：回答里说推上去了。
+    let id = agent_proposes(&f, json!({"action": "create", "draft": {"title": "PMI 用制造业的", "body": "PMI 默认指制造业 PMI。", "kind": "fact"}, "reason": "周报写错过"})).await;
+    let r = post(&f, &format!("/api/proposals/{id}/accept"), json!({})).await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let v = r.json();
+    assert_eq!(v["remote"]["pushed_new"], true, "{v}");
+    assert_eq!(v["remote"]["errors"], json!([]));
+    assert_eq!(
+        human(&bare, &["rev-parse", "refs/heads/main"]),
+        v["commit"].as_str().unwrap()
+    );
+
+    // 人推了一个改动，定时同步拉进来，索引里有了。
+    human(
+        remote_dir.path(),
+        &["clone", "-q", bare.to_str().unwrap(), "human"],
+    );
+    let clone = remote_dir.path().join("human");
+    std::fs::write(
+        clone.join("role-macro/数据源.md"),
+        format!("## 宏观数据从哪里取\n<!-- ctx id={MACRO} kind=fact tags=\"数据, 口径\" -->\n人改的：CPI、PPI 都用统计局的。\n"),
+    )
+    .unwrap();
+    human(&clone, &["commit", "-q", "-am", "人改口径"]);
+    human(&clone, &["push", "-q", "origin", "main"]);
+    let r = f.writer.sync(author.clone()).await.unwrap();
+    assert!(r.head_moved && r.errors.is_empty(), "{r:?}");
+    let item = get(&f, &format!("/api/items/{MACRO}")).await;
+    assert_eq!(
+        item["item"]["body"], "人改的：CPI、PPI 都用统计局的。",
+        "{item}"
+    );
+
+    // 合并不了：服务这边有一个没推上去的提交（模拟），人又改了同一行。
+    std::fs::write(
+        clone.join("role-macro/数据源.md"),
+        format!("## 宏观数据从哪里取\n<!-- ctx id={MACRO} kind=fact -->\n人又改了。\n"),
+    )
+    .unwrap();
+    human(&clone, &["commit", "-q", "-am", "人又改"]);
+    human(&clone, &["push", "-q", "origin", "main"]);
+    ContextRepo::open(&f.path)
+        .unwrap()
+        .commit(
+            &[put(
+                "role-macro/数据源.md",
+                &format!(
+                    "## 宏观数据从哪里取\n<!-- ctx id={MACRO} kind=fact -->\n服务这边改的。\n"
+                ),
+            )],
+            "离线时的改动",
+            &author,
+        )
+        .unwrap();
+    let id = agent_proposes(&f, json!({"action": "create", "draft": {"title": "M2 用月末值", "body": "M2 取月末值。", "kind": "fact"}, "reason": "常问"})).await;
+    let r = post(&f, &format!("/api/proposals/{id}/accept"), json!({})).await;
+    assert_eq!(
+        r.status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let v = r.json();
+    assert_eq!(v["code"], "needs_merge", "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("role-macro/数据源.md"),
+        "{v}"
+    );
+    let p = get(&f, &format!("/api/proposals/{id}")).await;
+    assert_eq!(p["proposal"]["status"], "open", "{p}");
+    let r = f.writer.sync(author).await.unwrap();
+    assert!(r.needs_merge, "{r:?}");
+    assert!(
+        git_as_human(&f.path, &["status", "--porcelain"])
+            .stdout
+            .is_empty()
     );
 
     f.store.drop_schema().await.unwrap();

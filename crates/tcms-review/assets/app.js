@@ -80,6 +80,12 @@
   const kindWord = (k) => KIND[k] || k;
   const badge = (text, cls) => h("span", { class: `badge ${cls || ""}` }, text);
   const short = (c) => (c ? c.slice(0, 12) : "");
+  // 配了远端时，批准、保存以后说一句推没推上去。
+  const remoteNote = (r) => {
+    if (!r) return "";
+    if (r.errors && r.errors.length) return `；没推到远端（${r.errors.join("；")}），提交在服务器上，下次同步时再推`;
+    return r.pushed_new ? "；已推到远端" : "";
+  };
   const fields = (pairs) =>
     h("dl", { class: "fields" }, pairs.filter((p) => p && p[1] !== null && p[1] !== undefined && p[1] !== "")
       .map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
@@ -271,7 +277,7 @@
       try {
         const r = await api("POST", path, body);
         const where = r.path ? `，写进 ${r.path}，提交 ${short(r.commit)}` : "";
-        await showProposal(p.id, `${okText}${where}${r.already_applied ? "（之前已经写进去了，这次只记下接受）" : ""}。`);
+        await showProposal(p.id, `${okText}${where}${r.already_applied ? "（之前已经写进去了，这次只记下接受）" : ""}${remoteNote(r.remote)}。`);
       } catch (e) {
         busy(false);
         if (e.status === 401) return;
@@ -454,7 +460,7 @@
         status.replaceChildren(h("p", { class: "muted" }, "正在保存…"));
         try {
           const r = await api("POST", `/api/items/${enc(it.id)}/edit`, change);
-          await showItem(it.id, `已保存：第 ${r.revision} 版，写进 ${r.path}，提交 ${short(r.commit)}。`);
+          await showItem(it.id, `已保存：第 ${r.revision} 版，写进 ${r.path}，提交 ${short(r.commit)}${remoteNote(r.remote)}。`);
         } catch (e) {
           save.disabled = false;
           if (e.status === 401) return;
