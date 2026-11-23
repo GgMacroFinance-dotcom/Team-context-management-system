@@ -1,4 +1,6 @@
 //! 令牌、审计，和按可见范围查变更（MCP 服务端用）。
+//!
+//! 令牌有两种：给 agent 的（连 MCP，绑定岗位、团队、项目），和给审核的人的（登录审核页）。两种互不通用。
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -74,12 +76,29 @@ impl Identity {
     }
 }
 
+/// 审核的人（审核页的令牌背后的人）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reviewer {
+    pub token_id: String,
+    pub name: String,
+}
+
+impl Reviewer {
+    /// 审计、提交信息里的写法。
+    pub fn actor(&self) -> String {
+        format!("{}（{}）", self.name, self.token_id)
+    }
+}
+
 /// `tcms token list` 的一行。
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenRow {
     pub id: String,
+    /// `agent` 或 `reviewer`。
+    pub kind: String,
     pub name: String,
-    pub role: String,
+    /// 审核的人的令牌没有岗位。
+    pub role: Option<String>,
     pub team: Option<String>,
     pub projects: Vec<String>,
     pub created_at: String,
@@ -139,11 +158,54 @@ impl Store {
         Ok((id, secret))
     }
 
-    /// 明文令牌 → 身份。不存在、已吊销、已过期都返回 `None`。
+    /// 给审核的人发一个令牌（登录审核页用），返回 `(id, 明文)`。
+    pub async fn create_reviewer_token(
+        &self,
+        name: &str,
+        expires_in_days: Option<i32>,
+        actor: &str,
+    ) -> Result<(String, String)> {
+        let id = format!("tok_{}", ulid::Ulid::generate());
+        let secret = new_secret()?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO tokens (id, kind, name, token_hash, expires_at)
+             VALUES ($1, 'reviewer', $2, $3, CASE WHEN $4::int4 IS NULL THEN NULL ELSE now() + make_interval(days => $4) END)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(hash_token(&secret))
+        .bind(expires_in_days)
+        .execute(&mut *tx)
+        .await?;
+        let detail = serde_json::json!({"kind": "reviewer", "name": name, "expires_in_days": expires_in_days});
+        audit(&mut tx, actor, "token.create", &id, detail).await?;
+        tx.commit().await?;
+        Ok((id, secret))
+    }
+
+    /// 审核页的令牌 → 审核的人。不存在、已吊销、已过期、是 agent 的令牌，都返回 `None`。
+    pub async fn identify_reviewer(&self, secret: &str) -> Result<Option<Reviewer>> {
+        let row = sqlx::query(
+            "SELECT id, name FROM tokens
+             WHERE token_hash = $1 AND kind = 'reviewer' AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > now())",
+        )
+        .bind(hash_token(secret))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Reviewer {
+            token_id: r.get(0),
+            name: r.get(1),
+        }))
+    }
+
+    /// agent 的令牌 → 身份。不存在、已吊销、已过期、是审核的人的令牌，都返回 `None`。
     pub async fn identify(&self, secret: &str) -> Result<Option<Identity>> {
         let row = sqlx::query(
             "SELECT id, name, role, team, projects FROM tokens
-             WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())",
+             WHERE token_hash = $1 AND kind = 'agent' AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(hash_token(secret))
         .fetch_optional(&self.pool)
@@ -159,7 +221,7 @@ impl Store {
 
     pub async fn list_tokens(&self) -> Result<Vec<TokenRow>> {
         let rows = sqlx::query(
-            "SELECT id, name, role, team, projects,
+            "SELECT id, kind, name, role, team, projects,
                     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'),
                     to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'),
                     to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'),
@@ -172,14 +234,15 @@ impl Store {
             .iter()
             .map(|r| TokenRow {
                 id: r.get(0),
-                name: r.get(1),
-                role: r.get(2),
-                team: r.get(3),
-                projects: r.get(4),
-                created_at: r.get(5),
-                expires_at: r.get(6),
-                revoked_at: r.get(7),
-                expired: r.get(8),
+                kind: r.get(1),
+                name: r.get(2),
+                role: r.get(3),
+                team: r.get(4),
+                projects: r.get(5),
+                created_at: r.get(6),
+                expires_at: r.get(7),
+                revoked_at: r.get(8),
+                expired: r.get(9),
             })
             .collect())
     }

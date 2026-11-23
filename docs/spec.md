@@ -145,7 +145,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
   - 上限：标题 200 字，正文 2 万字，理由 1 到 2 千字，证据最多 10 条、每条 500 字，标签最多 20 个、每个 50 字、不能有逗号换行引号。正文写进 Markdown 以后要能原样读回来（比如不能有一级、二级标题），不行就挡下并说明。
   - 批准：可以改标题、正文再接受。新建默认写进 `<范围目录>/<类型的中文名>.md`（比如 `role-macro/记忆.md`），可以指定同范围的别的文件；取代默认插在旧的那条后面（范围不同时写进新范围的默认文件）。目标被归档或取代了，只能拒绝。`base_revision` 落后时停下来，审核的人看过现在的内容以后写明看过的版本号（`--over N`）才接受，可以同时给出合并后的正文。
   - 新建、取代写成的条目 id 用提议 id 里那串 ULID（`prop_X` 批准后是 `ctx_X`），提议时就告诉 agent。批准做到一半断了（提交了但没记下），再批准一次时认得出已经写进去了，只记下，不写第二遍。
-  - 晋升（岗位到团队、全公司）和审核页还没做。
+  - 晋升（岗位到团队、全公司）还没做。审核页第 5 步做了（见 6.4）。
 
 ## 6. 接口
 
@@ -171,7 +171,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 
 ### 6.2 命令行
 
-`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals [<id>] [--status open|accepted|rejected|all]`（列表；写 id 时看一条：理由、证据、相近的条目、批准以后的差异）、`tcms accept <id> [--title] [--body-file] [--file] [--over N] [--note]`、`tcms reject <id> [--note]`、`tcms review-due`、`tcms token add|list|revoke`（给 agent 发令牌，明文只显示一次）、`tcms serve [--stdio]`、`tcms bench`。
+`tcms import <dir>`、`tcms reindex`、`tcms get ...`（和 `context_get` 一样，调试用）、`tcms search ...`（和 `context_search` 一样）、`tcms proposals [<id>] [--status open|accepted|rejected|all]`（列表；写 id 时看一条：理由、证据、相近的条目、批准以后的差异）、`tcms accept <id> [--title] [--body-file] [--file] [--over N] [--note]`、`tcms reject <id> [--note]`、`tcms review-due [--within N]`（复核日期到了的生效条目，往后 N 天到期的也可以列）、`tcms token add|list|revoke`（给 agent 发令牌，`--reviewer` 发给审核的人；明文只显示一次）、`tcms serve [--stdio]`、`tcms bench`。
 
 ### 6.3 Markdown 和导入
 
@@ -181,6 +181,15 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 ### 6.4 审核页
 
 一个简单的网页：待处理的提议（差异、矛盾对照、接受、改了再接受、拒绝），待复核的条目，按范围和类型浏览条目。不做编辑器，改条目直接改上下文仓库里的 Markdown（任何编辑器，或推到 git 远端），或者在审核页里改单条的纯文本。会用 git 的团队也可以把上下文仓库放到 GitHub 上，直接看提交历史。
+
+第 5 步（2026-11-23）的细节：
+
+- 在 `tcms serve`（HTTP）里，地址 `/review`。审核的人用自己的令牌登录：`tcms token add --reviewer --name 名字` 发的，只能登录审核页、连不了 MCP；agent 的令牌进不了审核页，所以 agent 批不了自己的提议。第一版审核的人能看、能处理所有范围。
+- 提议：列表按状态筛（默认待审核）；一条显示提议人、理由、证据、批准以后和现在差在哪里（按行），相近的条目展开后和提议的正文并排对照。接受、改了再接受（标题、正文、写进哪个文件、备注）、拒绝（写理由）和命令行的 `tcms accept`、`tcms reject` 规则一样；条目在提议之后被人改过时要勾上“看过现在的第 N 版”才接受；目标没了只能拒绝。
+- 待复核：复核日期到了的生效条目，日期早的在前，可以选往后 30、90 天内到期的。打开一条，看过以后改复核日期（或清空），保存。
+- 浏览：按范围、类型筛，带每个范围、类型的条数；可以全文检索（按全部范围）。一条显示元数据、正文、取代了谁、被谁取代。
+- 改单条：生效的条目可以改标题、标签、复核日期、正文，类型、范围不在这里改；人可以改规则。保存时写明打开时的版本号，期间被别人改过就停下来；没有改动、正文里有一级二级标题、日期不对都挡下。保存直接做成一个提交（提交者是审核的人，提交信息带 `Item:`、`Edited-by:`），和批准提议排同一个队。
+- 做成一个提交以后，页面在标题下面显示写进了哪个文件、哪个提交。
 
 ## 7. I.P. 怎么接
 
@@ -227,7 +236,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | 2 ✓ | tantivy 检索（中文 bigram）、编译上下文包、`tcms get`、`tcms search`、`tcms bench read`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和造出来的基准数据上跑过，没接真实团队的资料 | 固定数据下输出可重现；基准（`architecture.md` 第 10 节） |
 | 3 ✓ | MCP 服务端：四个读的工具（`context_propose` 挪到第 4 步），stdio 和 HTTP，令牌定范围；`tcms token`、`tcms serve`、`tcms bench serve`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端）和造出来的基准数据上跑过，没接真实的 agent | 用 MCP 客户端测；越权读回答和不存在一样 |
 | 4 ✓ | 提议、矛盾查找、提交队列（批准后写进 git）、命令行处理提议、`context_propose`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试（rmcp 的客户端，4 个进程同时批准 12 条）和造出来的基准数据上跑过，没接真实的 agent；还不推送到远端 | 单元测试；并发批准不丢提交 |
-| 5 | 审核页 | 浏览器里点一遍 |
+| 5 ✓ | 审核页（在 `tcms serve` 里）、审核的人的令牌、改单条、`tcms review-due`。**已做（2026-11-23）**，只在本地 PostgreSQL 16、测试和无头 Chromium（Playwright 脚本 `scripts/review-walk.js` 对着 `scripts/review-demo.sh` 造的数据点了一遍，21 项）上跑过，没有真人用过 | 浏览器里点一遍 |
 | 6 | I.P. 接入（在 I.P. 主仓库开 PR） | 先假模型，再真实模型 |
 | 7 | 评测：一批必须用到团队上下文才能答对的问题，比较接上前后 | 真实模型，要花费用，开工前问维护者 |
 | 以后 | 晋升（接 I.P. 岗位记忆）、和 AFFiNE 同步 | |

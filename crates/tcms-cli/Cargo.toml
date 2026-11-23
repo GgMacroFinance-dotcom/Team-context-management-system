@@ -22,6 +22,7 @@ tcms-core.workspace = true
 tcms-git.workspace = true
 tcms-index.workspace = true
 tcms-mcp.workspace = true
+tcms-review.workspace = true
 tcms-pack.workspace = true
 tcms-search.workspace = true
 tcms-store.workspace = true

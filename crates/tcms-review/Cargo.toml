@@ -1,0 +1,30 @@
+[package]
+name = "tcms-review"
+description = "审核页：待处理的提议（差异、相近的条目、接受、改了再接受、拒绝）、待复核的条目、按范围和类型浏览、改单条"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tcms-core.workspace = true
+tcms-git.workspace = true
+tcms-mcp.workspace = true
+tcms-search.workspace = true
+tcms-store.workspace = true
+tcms-write.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tcms-index.workspace = true
+tempfile.workspace = true
+tower.workspace = true

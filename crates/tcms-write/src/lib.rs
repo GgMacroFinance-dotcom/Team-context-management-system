@@ -4,14 +4,17 @@
 //! - [`accept`]、[`reject`]：人批准或拒绝。批准时排队（一个 schema 同一时间只处理一条），先把索引带到 HEAD，
 //!   条目在提议之后被人改过就停下来要人看过，再改文件、提交、索引。
 //! - [`proposal_diff`]：给审核的人看批准以后差在哪里。
+//! - [`edit_item`]：人在审核页里改单条的纯文本，和批准排在同一个提交队列里。
 
 mod accept;
 mod conflicts;
+mod edit_item;
 mod propose;
 mod review;
 
 pub use accept::{AcceptOptions, Accepted, WriteError, accept, default_path, reject};
 pub use conflicts::{Conflict, find_conflicts};
+pub use edit_item::{Edited, ItemEdit, edit_item};
 pub use propose::{
     Draft, MAX_OPEN_PER_AGENT, Proposal, ProposeArgs, ProposeError, item_id_of, propose, reach,
 };

@@ -38,7 +38,8 @@ impl ItemText {
         })
     }
 
-    fn matches(&self, p: &ParsedItem) -> bool {
+    /// 和解析出来的那一条完全一样（id、类型、标题、正文、标签、负责人、复核日期、取代）。
+    pub fn matches(&self, p: &ParsedItem) -> bool {
         p.id.as_ref() == Some(&self.id)
             && p.kind == self.kind
             && p.title == self.title

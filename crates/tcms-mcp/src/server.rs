@@ -117,14 +117,14 @@ pub async fn serve_stdio(live: Arc<Live>, secret: String) -> Result<(), Error> {
     Ok(())
 }
 
-/// HTTP：在 `listener` 上提供 [`router`]。`shutdown` 完成后不再接新连接，等手上的请求做完再返回。
+/// HTTP：在 `listener` 上提供 `app`（[`router`]，可以再合上别的路由，比如审核页）。
+/// `shutdown` 完成后不再接新连接，等手上的请求做完再返回。
 pub async fn serve_http(
-    live: Arc<Live>,
     listener: tokio::net::TcpListener,
-    options: HttpOptions,
+    app: Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(live, options))
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
 }

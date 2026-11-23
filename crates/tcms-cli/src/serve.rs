@@ -1,20 +1,25 @@
-//! `tcms serve`：MCP 服务端（`docs/architecture.md` 第 7 节）。
+//! `tcms serve`：MCP 服务端和审核页（`docs/architecture.md` 第 7 节）。
 //!
-//! 服务只读：条目的变化由 `tcms reindex` 写进 PostgreSQL，服务收到通知（或每 30 秒查一次）后换上新的检索索引。
-//! 默认是 Streamable HTTP（`/mcp`，每个请求带 Bearer 令牌）；`--stdio` 时走标准输入输出，令牌从 TCMS_TOKEN 读。
+//! 条目的变化由 `tcms reindex`（人直接改仓库时）或批准提议写进 PostgreSQL，服务收到通知（或每 30 秒查一次）后换上新的检索索引。
+//! 默认是 Streamable HTTP：`/mcp`（每个请求带 agent 的令牌）和审核页 `/review`（审核的人用自己的令牌登录）；
+//! `--stdio` 时只有 MCP，走标准输入输出，令牌从 TCMS_TOKEN 读。
 //! 两种都只往标准错误写提示，stdio 时标准输出只有协议消息。
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use tcms_mcp::{HttpOptions, Live};
+use tcms_review::{ReviewOptions, Writer};
 use tcms_store::Store;
 
 pub struct ServeArgs {
     pub stdio: bool,
     pub listen: SocketAddr,
     pub allowed_hosts: Vec<String>,
+    /// 上下文仓库（审核页批准、改单条时写）。
+    pub repo: PathBuf,
 }
 
 pub async fn run(store: Store, args: ServeArgs) -> Result<()> {
@@ -63,22 +68,38 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
         .await
         .with_context(|| format!("监听 {}", args.listen))?;
     let addr = listener.local_addr()?;
-    eprintln!("MCP 服务端：http://{addr}/mcp（健康检查 /healthz），Ctrl-C 停止");
+    if let Err(e) = tcms_git::ContextRepo::open(&args.repo) {
+        eprintln!(
+            "提醒：打不开上下文仓库 {}（{e}），审核页能看，但批准、改单条会失败；用 --repo 或 TCMS_REPO 指定",
+            args.repo.display()
+        );
+    }
+    let writer = Writer::spawn(live.store(), args.repo.clone()).context("起写入线程")?;
+    let app = tcms_mcp::router(
+        live.clone(),
+        HttpOptions {
+            allowed_hosts: args.allowed_hosts.clone(),
+        },
+    )
+    .merge(tcms_review::router(
+        live,
+        writer,
+        ReviewOptions {
+            allowed_hosts: args.allowed_hosts.clone(),
+            author_email: std::env::var("TCMS_GIT_EMAIL").unwrap_or_default(),
+        },
+    ));
+    eprintln!(
+        "MCP 服务端：http://{addr}/mcp；审核页：http://{addr}/review（健康检查 /healthz），Ctrl-C 停止"
+    );
     if args.allowed_hosts.is_empty() && !addr.ip().is_loopback() {
         eprintln!(
             "提醒：只接受 Host 是本机的请求；从别的机器用域名或 IP 连时，用 --allowed-host 写上它"
         );
     }
-    tcms_mcp::serve_http(
-        live,
-        listener,
-        HttpOptions {
-            allowed_hosts: args.allowed_hosts,
-        },
-        shutdown(),
-    )
-    .await
-    .context("HTTP 服务")?;
+    tcms_mcp::serve_http(listener, app, shutdown())
+        .await
+        .context("HTTP 服务")?;
     eprintln!("已停止");
     Ok(())
 }

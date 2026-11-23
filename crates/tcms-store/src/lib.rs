@@ -32,10 +32,10 @@ mod tokens;
 
 pub use sqlx::postgres::PgListener;
 
-pub use proposals::{Action, Decision, NewProposal, ProposalRow, Proposed};
+pub use proposals::{Action, CommitLock, Decision, NewProposal, ProposalRow, Proposed};
 pub use tokens::{
-    ALL_PROJECTS, Identity, NewToken, TOKEN_PREFIX, TokenRow, VisibleChange, VisibleChanges,
-    hash_token,
+    ALL_PROJECTS, Identity, NewToken, Reviewer, TOKEN_PREFIX, TokenRow, VisibleChange,
+    VisibleChanges, hash_token,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -268,6 +268,18 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| item_row(&r)))
+    }
+
+    /// 待复核的生效条目：复核日期在 `today`（YYYY-MM-DD）往后 `within_days` 天当天或之前（0 是今天以前到期的），日期早的在前。
+    pub async fn items_due(&self, today: &str, within_days: i32) -> Result<Vec<ItemRow>> {
+        let rows = sqlx::query(select_row!(
+            "WHERE status = 'active' AND review_by <= $1::date + $2::int4 ORDER BY review_by, scope, id"
+        ))
+        .bind(today)
+        .bind(within_days)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(item_row).collect())
     }
 
     /// 按 id 排序的全部条目（测试和调试用）。

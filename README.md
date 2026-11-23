@@ -6,7 +6,7 @@
 
 ## 现在能做什么
 
-第 1 到 4 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）；MCP 服务端（`context_get`、`context_search`、`context_read`、`context_changes`、`context_propose`，stdio 和 Streamable HTTP，令牌定范围）；agent 的提议（检查、脱敏、找相近的条目、挡乱提）由人在命令行批准后写进 git。审核页、推送到远端还没有。
+第 1 到 5 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）；MCP 服务端（`context_get`、`context_search`、`context_read`、`context_changes`、`context_propose`，stdio 和 Streamable HTTP，令牌定范围）；agent 的提议（检查、脱敏、找相近的条目、挡乱提）由人在审核页或命令行批准后写进 git；审核页还能看待复核的条目、按范围和类型浏览、改单条的纯文本。推送到远端还没有。
 
 ```sh
 cargo build --release
@@ -23,13 +23,15 @@ tcms search "周报 口径" --role macro                          # 按这个岗
 tcms token add --name "I.P. 宏观研报" --role macro --project q4-report   # 发令牌，明文只显示这一次
 tcms token list                                               # 列出令牌（不含明文）
 tcms token revoke tok_...                                     # 吊销，马上生效
+tcms token add --reviewer --name "王审核"                     # 给审核的人发令牌，登录审核页用（agent 的令牌登录不了）
 tcms proposals                                                # 待审核的提议
 tcms proposals prop_...                                       # 看一条：理由、证据、相近的条目、批准以后的差异
 tcms accept prop_...                                          # 批准：改 Markdown、做成一个提交、更新索引
 tcms accept prop_... --title "..." --body-file 改过的.md --note "..."   # 改了再接受
 tcms accept prop_... --over 3                                 # 条目在提议之后被人改过：看过第 3 版以后照样接受
 tcms reject prop_... --note "重复了"
-tcms serve                                                    # MCP 服务端：http://127.0.0.1:7341/mcp，请求带 Authorization: Bearer <令牌>
+tcms review-due --within 30                                   # 复核日期到了（和 30 天内到期）的条目
+tcms serve                                                    # MCP 服务端 http://127.0.0.1:7341/mcp（请求带 Authorization: Bearer <令牌>），审核页 http://127.0.0.1:7341/review
 tcms serve --listen 0.0.0.0:7341 --allowed-host ctx.example.com   # 对外提供时写上域名（默认只接受 Host 是本机的请求）
 TCMS_TOKEN=tcms_... tcms serve --stdio                        # 给同机、由 agent 启动的进程用
 tcms bench index --check                                      # 索引基准
@@ -37,7 +39,7 @@ tcms bench read --check                                       # 读的基准：�
 tcms bench serve --check                                      # 服务的基准：起 tcms serve --stdio 子进程，用 MCP 客户端量
 ```
 
-服务不直接写条目：agent 的 `context_propose` 只记下提议，人用 `tcms accept` 批准以后才写进上下文仓库（审核的人从 `TCMS_ACTOR` 或 `USER` 读，提交者从 `TCMS_GIT_NAME`、`TCMS_GIT_EMAIL` 读）。人直接改了上下文仓库以后运行 `tcms reindex`。服务收到通知（或每 30 秒查一次）后自己换上新的检索索引。
+agent 不直接写条目：`context_propose` 只记下提议，人在审核页或用 `tcms accept` 批准以后才写进上下文仓库。命令行批准时审核的人从 `TCMS_ACTOR` 或 `USER` 读，提交者从 `TCMS_GIT_NAME`、`TCMS_GIT_EMAIL` 读；审核页上提交者是登录的人，邮箱从 `TCMS_GIT_EMAIL` 读。人直接改了上下文仓库以后运行 `tcms reindex`。服务收到通知（或每 30 秒查一次）后自己换上新的检索索引。
 
 接 MCP 客户端（stdio）的配置大致是：
 
@@ -54,6 +56,8 @@ tcms bench serve --check                                      # 服务的基准�
 ```
 
 表放在 schema `tcms` 里（`--schema` 或 `TCMS_SCHEMA` 可改），第一次连接时自动建表。
+
+想先看看审核页：`TCMS_DATABASE_URL=postgres://... scripts/review-demo.sh` 造一个小上下文仓库（schema `tcms_demo`，目录 `./tcms-demo`）、发两个令牌、起服务、让 agent 提 4 条提议，然后打开它打印的地址，用它打印的令牌登录。装了 Playwright 的话，`node scripts/review-walk.js ...`（命令也是它打印的）会在无头浏览器里把审核页点一遍。
 
 ## 开发
 

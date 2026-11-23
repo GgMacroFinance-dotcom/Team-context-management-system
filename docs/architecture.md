@@ -87,7 +87,7 @@ context/                    ← 一个普通的 git 仓库
 
 **agent 提议**：`context_propose` → PostgreSQL 的 `proposals` 表，状态 `open`。不动 git。提议 id 是 `prop_` 加 ULID。检查、脱敏、找矛盾、挡乱提见 `spec.md` 第 5 节（`crates/tcms-write/src/propose.rs`）。每个令牌没处理的提议数在一个事务里数（先锁住那个令牌的行），重复的内容靠 `content_hash` 上只管 `open` 的唯一索引挡。
 
-**人批准**：审核页（第 5 步）或 `tcms accept <id>` → 进提交队列 → 改文件、提交、推送（配了远端的话；第 4 步还没有推送）。提交信息带上：
+**人批准**：审核页或 `tcms accept <id>` → 进提交队列 → 改文件、提交、推送（配了远端的话；第 4 步还没有推送）。提交信息带上：
 
 ```text
 修改：宏观数据从哪里取
@@ -111,6 +111,17 @@ Accepted-by: <审核的人>
 
 任何一步出错，事务回滚，提议还是 `open`。拒绝也走同一个队列，只改状态、记审计，不动 git。
 
+审核页上的接受、改单条交给服务里一个专门的写入线程（`crates/tcms-review/src/writer.rs`）：gix 的仓库对象不能跨线程共享，批准的那段异步代码不能放进 axum 的多线程运行时，所以这个线程自己跑一个单线程运行时，一件一件做，每件重新打开上下文仓库；用的数据库连接池另开（最多 3 个连接），和读的请求分开。拒绝只动数据库，直接在请求里做。
+
+**人在审核页改单条**（`crates/tcms-write/src/edit_item.rs`）：和批准排同一个队（同一把进程锁和 advisory lock），索引带到 HEAD，条目要还是生效的、版本号要和打开页面时一样，然后像批准“修改”一样只替换那一条的文字（元数据里没改的字段原样保留，比如 `owner`），提交，增量索引，记审计 `item.edit`。提交信息：
+
+```text
+人改：PMI 的口径
+
+Item: ctx_01JDX4M6Q8...
+Edited-by: 王审核（tok_01JDX4...）
+```
+
 **人直接改**：在服务器上改、或者推到远端。服务通过远端的 webhook、定时拉取、或者本地文件监听（notify）发现新提交，拉下来，重建改动部分的索引。
 
 **只有一个写入方**：一个 schema 同一时间只处理一条提议（上面第 1 步），所以命令行和服务同时批准也不会丢提交（测试里 4 个进程、每个进程同时批准 3 条，12 个提交都在 HEAD 的历史上；去掉锁时测试会失败）。提交前先拉远端；git 合并不了时，这条提议回到“需要人合并”，不强推（远端第 4 步还没做）。
@@ -123,7 +134,7 @@ Accepted-by: <审核的人>
 
 **取一份条目**：在一个只读的可重复读事务里，从 PostgreSQL 取出全部 `active` 条目、当时最大的 `changes` 序号和索引到的提交，三样对得上（`Store::snapshot`）。在这份条目上建 tantivy 索引（第 6 节）。`tcms get` 每次现取现建。
 
-**服务里的那一份**（`crates/tcms-mcp/src/live.rs`）：`tcms serve` 常驻一份条目和检索索引。收到 `NOTIFY tcms_changes`、或者每 30 秒，查一次最大的变更序号，和手上这份不一样就整份重取重建，建好再换上；换的时候请求继续用旧的，不等。通知断了会重新订阅，断线期间漏的由定时检查补上。服务本身不写条目，条目的变化都经过 `tcms reindex`。
+**服务里的那一份**（`crates/tcms-mcp/src/live.rs`）：`tcms serve` 常驻一份条目和检索索引。收到 `NOTIFY tcms_changes`、或者每 30 秒，查一次最大的变更序号，和手上这份不一样就整份重取重建，建好再换上；换的时候请求继续用旧的，不等。通知断了会重新订阅，断线期间漏的由定时检查补上。MCP 那边不写条目；条目的变化经过 `tcms reindex`、批准提议或在审核页改单条，这几条路写完都更新 PostgreSQL 里的索引并发通知，服务照上面的办法换上。
 
 取条目和建索引放在一个专门的线程里（自己的单线程 tokio 运行时、自己的一个数据库连接），tantivy 也在这个线程里直接写成一个段，不起它的后台线程。这样每一份条目和索引的内存都从同一处分配，放掉以后下一次重建接着用。一开始放在 tokio 的工作线程和 tantivy 自己的线程里，glibc 每个线程一块内存区，1 万条换 5 次索引物理内存从约 80 MB 涨到约 220 MB，换 7 次约 240 MB，还在涨；改了以后换 5 次约 85 到 96 MB，稳住了（第 10 节）。
 
@@ -152,9 +163,9 @@ Accepted-by: <审核的人>
   | `item_versions` | 版本号对应的提交和内容哈希 |
   | `proposals` | 提议 id（`prop_` 加 ULID）、动作、目标条目和当时的版本号、范围、类型、标题、正文、标签、复核日期、理由、证据、找到的矛盾（JSON）、内容哈希（`open` 的唯一）、抹了几处、提议的令牌和名字和岗位、状态（`open`、`accepted`、`rejected`）、提的时间、处理的时间和人和备注、写成的条目和提交 |
   | `changes` | 全局递增序号、条目 id、范围、版本号、提交、时间 |
-  | `tokens` | 令牌 id（`tok_` 加 ULID）、名字、令牌的 SHA-256、岗位、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。第 3 步只有给 agent 的令牌；审核的人的令牌第 5 步加 |
+  | `tokens` | 令牌 id（`tok_` 加 ULID）、种类（`agent` 或 `reviewer`）、名字、令牌的 SHA-256、岗位（只有 `agent` 有，约束保证）、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。两种令牌互不通用：核对 MCP 的令牌只认 `agent`，审核页只认 `reviewer` |
   | `usage` | 每条被放进上下文包、被 `read` 的次数，按岗位记 |
-  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝 |
+  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝，第 5 步加人在审核页改单条（`item.edit`） |
 
 - **行级安全**（还没做）：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。第 3 步服务读 `items`、`item_versions`、`changes` 时只在代码里过滤（`context_read`、`context_changes` 按令牌的范围，测试里核对了越权读和不存在回答一样）。
 - **迁移**：sqlx 的迁移文件（`crates/tcms-store/migrations/`），连接时自动跑。第一版用运行时查询（`sqlx::query`），每条 SQL 都由连真 PostgreSQL 的集成测试覆盖；以后表多了再考虑换成编译期检查的 `query!` 宏。批量写入用 `UNNEST`，一条语句写一批。
@@ -183,13 +194,19 @@ Accepted-by: <审核的人>
   - stdio（`tcms serve --stdio`）给同机、由 agent 启动的进程：令牌从环境变量 `TCMS_TOKEN` 读，启动时核对一次，以后每次调用再核对（吊销马上生效）；标准输出只放协议消息，提示写标准错误。
   - Streamable HTTP（`tcms serve`，默认 `127.0.0.1:7341`，`/mcp`）给远程的：每个请求带 `Authorization: Bearer <令牌>`，没带或不认时直接回 401，进不了 MCP；不发会话 id，直接回 JSON，不开 SSE。默认只接受 `Host` 是本机的请求（防 DNS 重绑定），对外提供时用 `--allowed-host` 加上域名。`/healthz` 不要令牌。收到 Ctrl-C 或 SIGTERM 时不再接新连接，做完手上的请求再退出。
   - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
-- HTTP（axum）：以后给审核页和 I.P. 控制台用的 JSON 接口和 `/mcp` 放在同一个服务里（第 5 步）。
+- 审核页（`crates/tcms-review`，第 5 步）：和 `/mcp` 在同一个 axum 服务里（`--stdio` 时没有）。
+  - `/review` 是一个静态页面，`app.js`、`app.css` 编进二进制（`include_str!`），不用构建前端，不加载外部资源；`/` 跳到 `/review`。
+  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
+  - 令牌存在浏览器的 sessionStorage 里（关掉标签页就没了），每次请求放在请求头里，不用 cookie，所以没有跨站请求伪造的问题。页面只用 `textContent` 和建元素写内容，不拼 HTML。
+  - 响应头：`Content-Security-Policy`（`default-src 'none'`，脚本、样式、请求只许同源，`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。和 `/mcp` 一样只接受 `Host` 是本机或 `--allowed-host` 写了的请求。
+  - 出错时回 `{"error": 一句话, "code": ..., "current": 现在的版本号（版本落后时）}`：没找到 404，不是待审核、版本落后、目标没了、仓库正忙（HEAD 变了或工作区不干净）409，参数不对 400。
+  - 提交者是审核的人的名字，邮箱从 `TCMS_GIT_EMAIL` 读（没设时 `tcms@localhost`）；上下文仓库从 `--repo` 或 `TCMS_REPO` 读，打不开时启动时提醒，页面能看，写会失败。
 - 鉴权：Bearer 令牌（`tcms_` 加 64 位十六进制，32 字节随机数），库里只存 SHA-256。令牌绑定身份（岗位、团队、能声明的项目），身份决定范围（`spec.md` 6.1）。令牌用 `tcms token add|list|revoke` 管，发和吊销记进 `audit`。
 
 **在智能岗位服务器上**
 
 - 一个 PostgreSQL（和 I.P. 共用，见第 5 节），`tcms` 作为 systemd 服务，上下文仓库在 `/var/lib/tcms/context`，可以配一个客户自己的远端（GitHub、Gitea 等）。
-- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。第 3 步还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`）。
+- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`）。
 
 **客户自己改造部署**
 
@@ -213,7 +230,7 @@ Accepted-by: <审核的人>
 | git | gix 0.90（纯 Rust，不依赖 libgit2） | MIT 或 Apache-2.0 |
 | 全文检索 | tantivy 0.27（不开默认特性：只用内存索引，不要 mmap、压缩、词干） | MIT |
 | MCP | rmcp 3.11（I.P. 用的 3.9；不开默认特性，只开服务端、stdio、Streamable HTTP 服务端，基准和测试另开客户端） | Apache-2.0 |
-| HTTP | axum 0.8（只开 http1、tokio） | MIT |
+| HTTP | axum 0.8（只开 http1、tokio、json、query） | MIT |
 | 令牌的随机数 | getrandom 0.4 | MIT 或 Apache-2.0 |
 | Markdown | comrak 1.x | BSD-2-Clause |
 | 文件监听 | notify 9 | CC0-1.0 |
@@ -223,10 +240,11 @@ Accepted-by: <审核的人>
 | 脱敏 | regex 1 | MIT 或 Apache-2.0 |
 | 审核时的差异 | similar 2 | Apache-2.0 |
 | 命令行 | clap 4 | MIT 或 Apache-2.0 |
+| 测试审核页的接口（只在测试里） | tower 0.5（util）、http-body-util 0.1 | MIT |
 
 | 以后：Yjs | yrs 0.28 | MIT |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 
@@ -255,6 +273,8 @@ Accepted-by: <审核的人>
 | 空闲时内存 | < 50 MB | 没达到，见下面 |
 
 `tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
+
+审核页（第 5 步）没有加新的基准：它的接口是人点一下调一次，不在热路径上；接受、改单条和 `tcms accept` 走同一个提交队列，批准的耗时已经在 `bench serve` 里量了。
 
 “空闲时内存 < 50 MB”是给第 3 步的常驻服务定的，**1 万条时没达到**：处理过请求以后约 55 到 61 MB，换过几次索引以后约 76 到 97 MB（重建时新旧两份同时在，放掉以后内存留在进程里给下一次用）。其中约 14 MB 是程序本身映射进来的代码，条目加检索索引约 26 到 33 MB。试过的：
 

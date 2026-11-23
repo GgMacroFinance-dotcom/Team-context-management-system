@@ -82,7 +82,7 @@ fn bad<T>(msg: impl Into<String>) -> Result<T, WriteError> {
 }
 
 /// 读 HEAD 里的一个文件，没有时返回 `None`。
-fn read_at(
+pub(crate) fn read_at(
     repo: &ContextRepo,
     head: Option<ObjectId>,
     path: &str,

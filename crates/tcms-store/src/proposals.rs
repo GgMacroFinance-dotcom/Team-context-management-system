@@ -271,13 +271,7 @@ impl Store {
     /// 开始处理一条提议：拿到提交队列的锁（一个 schema 同一时间只处理一条），锁住这一行。
     /// 没有这条提议时返回 `None`。拿到的 [`Decision`] 放掉（没有 accept/reject）就是什么都没做。
     pub async fn begin_decision(&self, id: &str) -> Result<Option<Decision>> {
-        let queue = self.commit_queue.clone().lock_owned().await;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('tcms_commit:' || current_schema(), 0))",
-        )
-        .execute(&mut *tx)
-        .await?;
+        let (queue, mut tx) = self.lock_commit_queue().await?;
         let found = sqlx::query(select_proposal!("WHERE id = $1 FOR UPDATE"))
             .bind(id)
             .fetch_optional(&mut *tx)
@@ -287,6 +281,50 @@ impl Store {
             _queue: queue,
             proposal: row(&r),
         }))
+    }
+
+    /// 排进提交队列：先拿进程里的锁（没拿到之前不占数据库连接），再开事务拿 PostgreSQL 的锁（别的进程也排在这里）。
+    async fn lock_commit_queue(
+        &self,
+    ) -> Result<(
+        tokio::sync::OwnedMutexGuard<()>,
+        Transaction<'static, Postgres>,
+    )> {
+        let queue = self.commit_queue.clone().lock_owned().await;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('tcms_commit:' || current_schema(), 0))",
+        )
+        .execute(&mut *tx)
+        .await?;
+        Ok((queue, tx))
+    }
+
+    /// 人直接改一条（审核页里改单条）之前排进提交队列，和批准提议排在同一个队里。
+    pub async fn begin_commit(&self) -> Result<CommitLock> {
+        let (queue, tx) = self.lock_commit_queue().await?;
+        Ok(CommitLock { tx, _queue: queue })
+    }
+}
+
+/// 拿着提交队列的锁。放掉（没有 finish）就是什么都没做。
+pub struct CommitLock {
+    tx: Transaction<'static, Postgres>,
+    _queue: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl CommitLock {
+    /// 记进审计，放掉锁。
+    pub async fn finish(
+        mut self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        detail: serde_json::Value,
+    ) -> Result<()> {
+        audit(&mut self.tx, actor, action, target, detail).await?;
+        self.tx.commit().await?;
+        Ok(())
     }
 }
 
