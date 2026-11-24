@@ -1,4 +1,4 @@
-//! 按标题块把正文切成条目（和上下文仓库的规矩一样，`docs/architecture.md` 第 2 节）：
+//! 按标题块把正文切成条目（和 TCMS 上下文仓库的规矩一样，`docs/architecture.md` 第 2 节）：
 //! 最上一层的二级标题开始一条，到下一个一级或二级标题为止；不在任何二级标题下面的块不算条目。
 
 use crate::markdown::to_markdown;
