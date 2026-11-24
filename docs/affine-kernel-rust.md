@@ -57,7 +57,7 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 
 | | 甲：不带界面的文档内核（推荐） | 乙：甲 + 兼容 AFFiNE 的 Rust 服务端 | 丙：把浏览器里的文档模型换成 Rust（WASM） | 丁：编辑器 |
 | --- | --- | --- | --- | --- |
-| 做什么 | Rust 库：块模型和 27 种块的属性、工作区根文档（文档列表、文件夹、文档属性）、Markdown 和 BlockSuite 快照的导入导出、同步协议客户端、本地 SQLite 存储 | 再写一个服务端：socket.io 同步网关、文档和附件存储、登录、工作区和成员、评论，接 AFFiNE 原版前端 | 用 Rust 写 `blocksuite/framework/store` 的替代品，编译成 WASM 给编辑器用 | 重写编辑器 |
+| 做什么 | Rust 库：块模型和全部块（28 种）的属性、工作区根文档（文档列表、文件夹、文档属性）、Markdown 和 BlockSuite 快照的导入导出、同步协议客户端、本地 SQLite 存储 | 再写一个服务端：socket.io 同步网关、文档和附件存储、登录、工作区和成员、评论，接 AFFiNE 原版前端 | 用 Rust 写 `blocksuite/framework/store` 的替代品，编译成 WASM 给编辑器用 | 重写编辑器 |
 | 谁用 | TCMS 的同步、I.P. 的岗位（读写团队文档）、命令行工具 | 想要全开源、不要企业版后端的自托管用户；TCMS 也可以不再单独跑一个 AFFiNE | AFFiNE 前端 | — |
 | 和 AFFiNE 的关系 | 当客户端，不改 AFFiNE | 替掉 AFFiNE 的后端，前端照用 | 要改 AFFiNE 前端 | — |
 | 规模 | 约 6 个 PR，5 到 7 周 | 甲之外再 12 到 20 个 PR，3 到 4 个月 | 大，且收益不清楚（见 2.4） | 不做 |
@@ -85,7 +85,7 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 | 步 | 内容 | 怎么测 | 估计 |
 | --- | --- | --- | --- |
 | K0 | 这份方案 | — | 本 PR |
-| K1 | 新 crate `affine-doc`：从 `tcms-affine` 拆出不依赖 TCMS 的部分（读写块树、Markdown 子集），`tcms-affine` 改成调它；补齐 27 种块的结构（先只读，认得每种块的属性，不认得的原样留着）；工作区根文档（`meta.pages`、`folders`、`docProperties`）的读写 | A1 的 13 个测试照过；每种块各造一个文档往返；AFFiNE 的 MIT 测试快照能读 | 1 到 2 个 PR，1.5 周 |
+| K1 | 新 crate `affine-doc`：从 `tcms-affine` 拆出不依赖 TCMS 的部分（读写块树、Markdown 子集），`tcms-affine` 改成调它；补齐全部块（28 种）的结构（先只读，认得每种块的属性，不认得的原样留着）；工作区根文档（`meta.pages`、`folders`、`docProperties`）的读写 | A1 的 13 个测试照过；每种块各造一个文档往返；AFFiNE 的 MIT 测试快照能读 | 1 到 2 个 PR，1.5 周 |
 | K2 | 导入导出：BlockSuite 快照（`.snapshot.json` 和导出的 zip）读写；Markdown 补上表格、图片引用、数据库块转成表格（只导出）；按工作区整体导出、导入 | 用 AFFiNE 自己导出的 zip 读进来再写出去，再导回 AFFiNE 看打不打得开（手动一次，记在 PR 里） | 2 个 PR，2 周 |
 | K3 | 同步协议客户端 `affine-sync-client`：就是 A2 的连接层挪过来 | A2 自己的测试 | A2 合并后 1 个小 PR，2 天 |
 | K4 | 本地存储：SQLite 里存更新、快照、时钟，定期合并，断网时能改、连上后补推（参考 MIT 的 `affine_nbstore` 的设计，不复制代码，不用它依赖的 AGPL crate） | 断网改、两端同时改、重启 | 1 到 2 个 PR，1.5 周 |
@@ -97,7 +97,15 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 - `order`：AFFiNE 列表用的排序键。照公开的 `fractional-indexing` 算法自己写了一遍，外面再加 AFFiNE 的 `0` 加 32 个随机字符的后缀；生成的键能被 AFFiNE 再拿去当邻居。
 - `workspace`：根文档 `meta` 的工作区名字和文档列表（读 BlockSuite 写的 Y.Map 形式，也读普通对象形式；认不得的字段原样留着）；工作区“数据库”的通用表（`db$<表名>`，删除标记 `$$DELETED`）；文件夹树（建文件夹、放链接、改名、挪动、连同下面一起删，规矩和 AFFiNE 前端一样：根上只放文件夹、不能挪进自己下面）；文档属性（`custom:*` 这类不认得的字段不丢）。
 - 测试：原来的 13 个加上新的 11 个（排序键 6 个，其中 5 条是 AFFiNE 自己测试里写明的行为；工作区 5 个，都编码成 Yjs 更新在另一个 Doc 里应用再读）。都是自己造的数据，**还没拿真 AFFiNE 的根文档和 `db$folders` 对照过**：A2 那边对着 Docker 里的 AFFiNE 0.27.5-beta.3 核对过文件夹表的字段和排序键格式，和这里一致；拿真文档做的对照测试等 A2 合并后补。
-- 还没做：27 种块的结构（K1 第二个 PR）；0.27.5 服务端的“工作区状态”（开了以后文档列表以服务端为准），等 A2 核对。
+- 还没做：27 种块的结构（K1 第二个 PR，见 5.2）。0.27.5 服务端的“工作区状态”不用接：A2 核对过，0.27.5-beta.3 的网页版用同步协议 1，文档列表和回收站还在 `meta.pages` 里（移进回收站多出 `trash: true`、`trashDate`、`updatedDate`），工作区状态要协议 2。
+
+### 5.2 K1 第二个 PR 做了什么（2026-11-24）
+
+- `schema`：AFFiNE 0.27.5 的全部块，数下来是 28 种（方案里写的“27 种”少数了一种），包括前端的两种 AI 块 `affine:embed-ai-chat`、`affine:transcription`。每种块记了版本号、角色、能放在哪些块下面、哪些属性是带格式的文字、是不是只在白板里、属性是不是拍平存（`affine:table` 存成 `prop:cells.<行>:<列>.text` 这样）。`doc` 写块时的版本号也改成查这张表。
+- `read_tree`：不挑块，从页面块往下把整棵树读出来，白板和只在白板里显示的 note 也读。`sys:*` 和全部 `prop:*` 原样带着，嵌套的 Y.Map、Y.Array 照原样读成嵌套的值。带格式的文字保留全部属性（颜色、行内引用这类 Markdown 写不出的也在），拍平存的表格拼回嵌套的样子。
+- `check_tree`：检查一棵树合不合 0.27.5 的规矩，会查出四种问题：不认得的块、版本号不对、放错了地方、该是文字的属性不是文字。打算在写完一篇文档、读回来以后跑一遍（`affine-sync.md` 5.3 第 5 条）。
+- 这一步只读，不写这些块。
+- 测试：新加 5 个。表格和数据库各造一个，编码成更新以后在另一个 Doc 里读。另外在本地拿 AFFiNE 仓库里 MIT 的三个测试快照（`packages/common/reader/__tests__/__fixtures__`）手动跑了一遍：两篇文档里有 14 种块，结构检查没有问题；根文档读出了工作区名字和文档列表。这样根文档的读法也和真 AFFiNE 对上了。这个对照用忽略的测试 `interop_with_affine_files` 跑，环境变量多了一个 `AFFINE_DOC_ROOT_FIXTURE`。`db$folders` 还没有真数据对照，等 A2。
 
 合计约 6 到 8 个 PR、5 到 7 周（两位工程师加 Claude；Claude 能写大部分代码，工程师主要读代码和对真 AFFiNE 验收）。
 

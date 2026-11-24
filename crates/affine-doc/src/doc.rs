@@ -32,13 +32,9 @@ const LIST: &str = "affine:list";
 const CODE: &str = "affine:code";
 const DIVIDER: &str = "affine:divider";
 
-/// 各种块在 AFFiNE 0.27.5 里的版本号（BlockSuite 的 `metadata.version`）。
+/// 各种块在 AFFiNE 0.27.5 里的版本号（BlockSuite 的 `metadata.version`，表在 [`crate::schema`]）。
 fn version_of(flavour: &str) -> i64 {
-    match flavour {
-        PAGE => 2,
-        SURFACE => 5,
-        _ => 1,
-    }
+    crate::schema::flavour(flavour).map_or(1, |f| f.version)
 }
 
 /// 嵌套最多读几层，防止坏数据里有环。
