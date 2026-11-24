@@ -11,6 +11,7 @@ repository = "https://github.com/GgMacroFinance-dotcom/Team-context-management-s
 
 [workspace.dependencies]
 tcms-core = { path = "crates/tcms-core" }
+tcms-affine = { path = "crates/tcms-affine" }
 tcms-git = { path = "crates/tcms-git" }
 tcms-store = { path = "crates/tcms-store" }
 tcms-index = { path = "crates/tcms-index" }
@@ -42,6 +43,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 similar = "2"
+# AFFiNE 0.27.5 用的是 yjs 13.6，客户端 id 是 32 位；yrs 0.28 默认 53 位，开 small-client 和它一样。
+yrs = { version = "0.28", default-features = false, features = ["small-client"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"
 tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
