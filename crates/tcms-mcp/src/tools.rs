@@ -9,7 +9,7 @@ use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool, ToolAnnotation
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tcms_core::{Kind, Scope, utc_today, valid_name};
-use tcms_pack::{Request, compile};
+use tcms_pack::{Request, Section, compile};
 use tcms_search::{SearchOptions, Visibility};
 use tcms_store::{Identity, ItemRead};
 use tcms_write::{ProposeArgs, ProposeError, reach};
@@ -265,6 +265,14 @@ fn get(live: &Live, who: &Identity, a: GetArgs) -> Outcome {
         },
     )
     .map_err(internal)?;
+    // 按任务挑中、放了全文的算用到了（固定前缀里的每次都在，不算），找晋升候选用。
+    live.record_uses(
+        &who.role,
+        pack.included
+            .iter()
+            .filter(|i| i.section == Section::Task)
+            .map(|i| i.id.as_str()),
+    );
     if let Some(p) = &a.project {
         let scope = Scope::Project(p.clone());
         let any = project.is_some() && index.corpus().items().iter().any(|it| it.scope == scope);
@@ -328,6 +336,7 @@ async fn read(live: &Live, who: &Identity, a: ReadArgs) -> Outcome {
     if !visible(&current.scope) || !visible(&version.scope) {
         return Err(missing());
     }
+    live.record_uses(&who.role, [current.id.as_str()]);
     // 被哪条取代了（只说调用者看得到的）。
     let index = live.current();
     let superseded_by: Vec<&str> = index

@@ -174,8 +174,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// 系统找的晋升候选：几个岗位（或团队、项目）都写了的相近条目，建议提到哪里。只是列出来，
-    /// 挑一条用 tcms promote 发起。
+    /// 系统找的晋升候选：几个岗位（或团队、项目）都写了的相近条目，和最近用得多的岗位、团队、项目条目，
+    /// 建议提到哪里。只是列出来，挑一条用 tcms promote 发起。
     SuggestPromotions {
         /// 用 JSON 输出。
         #[arg(long)]

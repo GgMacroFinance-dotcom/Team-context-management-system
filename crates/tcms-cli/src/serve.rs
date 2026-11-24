@@ -73,13 +73,17 @@ pub async fn run(store: Store, args: ServeArgs) -> Result<()> {
     let result = match secret {
         Some(secret) => {
             eprintln!("MCP 服务端（stdio）已启动");
-            tcms_mcp::serve_stdio(live, secret)
+            tcms_mcp::serve_stdio(live.clone(), secret)
                 .await
                 .map_err(anyhow::Error::from)
         }
-        None => http(live, args).await,
+        None => http(live.clone(), args).await,
     };
     follow.abort();
+    // 停之前把攒着的“条目用了几次”写进库。
+    if let Err(e) = live.flush_uses().await {
+        eprintln!("记条目用了几次失败：{e}");
+    }
     result
 }
 

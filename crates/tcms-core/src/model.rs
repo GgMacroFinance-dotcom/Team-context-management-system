@@ -287,10 +287,15 @@ pub fn valid_date(s: &str) -> bool {
 
 /// 今天的日期（UTC），`YYYY-MM-DD`。
 pub fn utc_today() -> String {
+    utc_days_ago(0)
+}
+
+/// `days` 天以前的日期（UTC），`YYYY-MM-DD`。
+pub fn utc_days_ago(days: i64) -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64 - days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
