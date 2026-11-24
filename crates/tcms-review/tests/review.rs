@@ -105,7 +105,13 @@ async fn fixture_with(remote: impl FnOnce(&Path) -> Option<Remote>) -> Option<Fi
         .await
         .unwrap();
     let live = Live::load(store.clone()).await.unwrap();
-    let writer = Writer::spawn(&store, dir.path().to_owned(), remote(dir.path())).unwrap();
+    let writer = Writer::spawn(
+        &store,
+        dir.path().to_owned(),
+        remote(dir.path()),
+        std::time::Duration::from_secs(60),
+    )
+    .unwrap();
     let app = router(
         live.clone(),
         writer.clone(),
@@ -259,6 +265,12 @@ async fn pages_login_and_hosts() {
         assert_eq!(r.json()["code"], "login");
     }
     assert_eq!(get(&f, "/api/me").await["name"], "王审核");
+    // 远端的情况也要令牌；没配远端时 remote 为空。
+    let r = send(&f.app, "GET", "/api/remote", Some(&f.agent_secret), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    let st = get(&f, "/api/remote").await;
+    assert!(st["remote"].is_null() && st["last"].is_null(), "{st}");
+    assert!(st["now_ms"].as_u64().unwrap() > 0, "{st}");
     // agent 的令牌批准不了提议。
     let id = agent_proposes(&f, json!({"action": "create", "draft": {"title": "自己批自己", "body": "不行"}, "reason": "x"})).await;
     let r = send(
@@ -713,9 +725,29 @@ async fn remote_push_and_needs_merge() {
         email: "tcms@localhost".into(),
     };
 
+    // 还没同步过：审核页知道配了哪个远端、多久同步一次。
+    let st = get(&f, "/api/remote").await;
+    assert!(
+        st["remote"].as_str().unwrap().contains("remote.git"),
+        "{st}"
+    );
+    assert_eq!(st["sync_secs"], 60);
+    assert!(
+        st["last"].is_null() && st["last_ok_ms"].is_null() && st["needs_merge"].is_null(),
+        "{st}"
+    );
+
     // 第一次同步：推上去。
     let r = f.writer.sync(author.clone()).await.unwrap();
     assert!(r.errors.is_empty() && r.pushed_new, "{r:?}");
+    let st = get(&f, "/api/remote").await;
+    assert_eq!(st["last"]["what"], "sync", "{st}");
+    assert_eq!(st["last"]["report"]["pushed_new"], true, "{st}");
+    assert_eq!(st["last_ok_ms"], st["last"]["at_ms"], "{st}");
+    assert!(
+        st["last"]["at_ms"].as_u64().unwrap() <= st["now_ms"].as_u64().unwrap(),
+        "{st}"
+    );
 
     // 接受：回答里说推上去了。
     let id = agent_proposes(&f, json!({"action": "create", "draft": {"title": "PMI 用制造业的", "body": "PMI 默认指制造业 PMI。", "kind": "fact"}, "reason": "周报写错过"})).await;
@@ -733,6 +765,7 @@ async fn remote_push_and_needs_merge() {
         human(&bare, &["rev-parse", "refs/heads/main"]),
         v["commit"].as_str().unwrap()
     );
+    assert_eq!(get(&f, "/api/remote").await["last"]["what"], "accept");
 
     // 人推了一个改动，定时同步拉进来，索引里有了。
     human(
@@ -776,6 +809,7 @@ async fn remote_push_and_needs_merge() {
             &author,
         )
         .unwrap();
+    let ok_before = get(&f, "/api/remote").await["last_ok_ms"].clone();
     let id = agent_proposes(&f, json!({"action": "create", "draft": {"title": "M2 用月末值", "body": "M2 取月末值。", "kind": "fact"}, "reason": "常问"})).await;
     let r = post(&f, &format!("/api/proposals/{id}/accept"), json!({})).await;
     assert_eq!(
@@ -795,8 +829,44 @@ async fn remote_push_and_needs_merge() {
     );
     let p = get(&f, &format!("/api/proposals/{id}")).await;
     assert_eq!(p["proposal"]["status"], "open", "{p}");
-    let r = f.writer.sync(author).await.unwrap();
+    // 审核页顶上提示合并不了，写明文件和怎么合并；上次正常的时间还是之前那次。
+    let st = get(&f, "/api/remote").await;
+    let msg = st["needs_merge"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("role-macro/数据源.md") && msg.contains("tcms/main-unmerged"),
+        "{st}"
+    );
+    assert_eq!(st["last"]["what"], "accept", "{st}");
+    assert_eq!(st["last_ok_ms"], ok_before, "{st}");
+    let r = f.writer.sync(author.clone()).await.unwrap();
     assert!(r.needs_merge, "{r:?}");
+    let st = get(&f, "/api/remote").await;
+    assert_eq!(st["last"]["what"], "sync", "{st}");
+    assert!(
+        st["needs_merge"]
+            .as_str()
+            .unwrap()
+            .contains("role-macro/数据源.md")
+    );
+
+    // 人在自己的克隆里合并旁支、推回 main：下次同步快进过去，提示没了。
+    human(&clone, &["fetch", "-q", "origin", "tcms/main-unmerged"]);
+    let merged = git_as_human(&clone, &["merge", "-q", "--no-edit", "FETCH_HEAD"]);
+    assert!(!merged.status.success(), "这里应该有冲突");
+    std::fs::write(
+        clone.join("role-macro/数据源.md"),
+        format!("## 宏观数据从哪里取\n<!-- ctx id={MACRO} kind=fact -->\n合并好的。\n"),
+    )
+    .unwrap();
+    human(&clone, &["add", "role-macro/数据源.md"]);
+    human(&clone, &["commit", "-q", "--no-edit"]);
+    human(&clone, &["push", "-q", "origin", "main"]);
+    let r = f.writer.sync(author).await.unwrap();
+    assert!(r.head_moved && r.errors.is_empty(), "{r:?}");
+    let st = get(&f, "/api/remote").await;
+    assert!(st["needs_merge"].is_null(), "{st}");
+    assert_eq!(st["last_ok_ms"], st["last"]["at_ms"], "{st}");
+
     assert!(
         git_as_human(&f.path, &["status", "--porcelain"])
             .stdout

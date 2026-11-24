@@ -70,6 +70,8 @@
       showLogin((data && data.error) || "要重新登录");
       throw new ApiFail(401, data);
     }
+    // 批准、改单条会和远端打交道，做完（成不成都算）更新页面顶上那一行。
+    if (method === "POST") setTimeout(refreshRemote, 0);
     if (!r.ok) throw new ApiFail(r.status, data);
     return data;
   }
@@ -97,11 +99,67 @@
     return Math.round((b - a) / 86400000);
   }
 
+  // ---------- 远端 ----------
+
+  // 页面顶上一行：配了远端时，最近一次同步的结果；合并不了时写明哪些文件、怎么合并。没配远端时不显示。
+  const remoteBar = document.getElementById("remote");
+  const WHAT = { sync: "同步", accept: "批准时同步", edit: "改单条时同步" };
+
+  function ago(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s} 秒前`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m} 分钟前`;
+    const hr = Math.round(m / 60);
+    if (hr < 48) return `${hr} 小时前`;
+    return `${Math.round(hr / 24)} 天前`;
+  }
+
+  async function refreshRemote() {
+    if (!me) return;
+    let s;
+    try {
+      s = await api("GET", "/api/remote");
+    } catch {
+      return;
+    }
+    if (!me || !s.remote) {
+      remoteBar.hidden = true;
+      return;
+    }
+    const when = (ms) => ago(s.now_ms - ms);
+    const parts = [`远端 ${s.remote}`, s.sync_secs ? `每 ${s.sync_secs} 秒同步一次` : "只在批准、改单条时同步"];
+    let cls = "";
+    let detail = null;
+    const last = s.last;
+    if (s.needs_merge) {
+      cls = "err";
+      parts.push("合并不了，批准和改单条会停下来，合并好以后下次同步就恢复");
+      detail = s.needs_merge;
+    } else if (last && last.report.errors.length) {
+      cls = "warn";
+      parts.push(`${WHAT[last.what] || "同步"}没成（${when(last.at_ms)}）`);
+      parts.push(s.last_ok_ms ? `上次正常是 ${when(s.last_ok_ms)}` : "启动以后还没成功过");
+      detail = `${last.report.errors.join("；")}。提交在服务器上，下次同步时再推。`;
+    } else if (last) {
+      parts.push(`上次${WHAT[last.what] || "同步"} ${when(last.at_ms)}，正常`);
+      if (last.report.ids) parts.push(`远端新来的 ${last.report.ids.items.length} 条补了 id`);
+    } else {
+      parts.push("启动以后还没同步过");
+    }
+    remoteBar.className = `remote-bar ${cls}`;
+    remoteBar.replaceChildren(h("div", {}, parts.join(" · ")));
+    if (detail) remoteBar.append(h("div", { class: "detail" }, detail));
+    remoteBar.hidden = false;
+  }
+  setInterval(refreshRemote, 30000);
+
   // ---------- 登录 ----------
 
   function showLogin(msg) {
     document.getElementById("tabs").hidden = true;
     document.getElementById("who").hidden = true;
+    remoteBar.hidden = true;
     const input = h("input", { type: "password", id: "token", autocomplete: "off", spellcheck: "false", placeholder: "tcms_…" });
     const form = h("form", {
       class: "stack",
@@ -147,6 +205,7 @@
       document.getElementById("tabs").hidden = false;
       document.getElementById("who").hidden = false;
       document.getElementById("who-name").textContent = me.name;
+      refreshRemote();
     }
     const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
     const tab = parts[0] || "proposals";

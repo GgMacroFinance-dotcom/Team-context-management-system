@@ -82,8 +82,13 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
             args.repo.display()
         );
     }
-    let writer = Writer::spawn(live.store(), args.repo.clone(), args.remote.clone())
-        .context("起写入线程")?;
+    let writer = Writer::spawn(
+        live.store(),
+        args.repo.clone(),
+        args.remote.clone(),
+        args.sync_every,
+    )
+    .context("起写入线程")?;
     let sync = match &args.remote {
         Some(remote) if !args.sync_every.is_zero() => {
             eprintln!(

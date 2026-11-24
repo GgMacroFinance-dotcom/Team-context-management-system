@@ -20,7 +20,7 @@ use axum::routing::{get, post};
 use http::{HeaderValue, StatusCode, header};
 use tcms_mcp::{Live, bearer};
 
-pub use writer::Writer;
+pub use writer::{Contact, RemoteStatus, Writer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -75,6 +75,7 @@ pub fn router(live: Arc<Live>, writer: Writer, options: ReviewOptions) -> Router
         .route("/api/items", get(api::items))
         .route("/api/items/{id}", get(api::item))
         .route("/api/items/{id}/edit", post(api::edit))
+        .route("/api/remote", get(api::remote))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_reviewer,
