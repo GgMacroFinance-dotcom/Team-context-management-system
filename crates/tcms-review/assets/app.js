@@ -214,6 +214,7 @@
     try {
       if (tab === "due") await showDue();
       else if (tab === "items") await (parts[1] ? showItem(parts[1]) : showItems());
+      else if (tab === "promotions") await showPromotions();
       else if (tab === "proposals") await (parts[1] ? showProposal(parts[1]) : showProposals());
       else location.hash = "#/proposals";
     } catch (e) {
@@ -504,22 +505,35 @@
 
   // 晋升：做成一条提议（换了范围的取代），进待审核的列表，要再批准一次才生效。
   function promoteItem(it, targets) {
-    const to = h("select", { id: "promote-to" }, targets.map((t) => h("option", { value: t }, scopeWord(t))));
-    const reason = h("textarea", { id: "promote-reason", rows: 3, placeholder: "比如：几个岗位都要用到" });
+    return promoteForm({
+      items: [it], targets, reason: "", suffix: "",
+      hint: `批准以后在新的范围里写一条一样的，取代 ${it.scope} 里的这一条；能看到新范围的 agent 都会用上它。`,
+    });
+  }
+
+  // 晋升的表单。几条里挑一条（系统找的候选）时多一个“提哪一条”。`suffix` 让一页上的几个表单 id 不重复。
+  function promoteForm({ items, targets, reason: initial, suffix, hint }) {
+    const which = items.length > 1
+      ? h("select", { id: `promote-item${suffix}` }, items.map((it) => h("option", { value: it.id }, `${it.scope}：${it.title}`)))
+      : null;
+    const to = h("select", { id: `promote-to${suffix}` }, targets.map((t) => h("option", { value: t }, scopeWord(t))));
+    const reason = h("textarea", { id: `promote-reason${suffix}`, class: "reason", rows: 3, placeholder: "比如：几个岗位都要用到" });
+    reason.value = initial;
     const go = h("button", { type: "submit", class: "secondary" }, "做成一条晋升提议");
     const note = h("div", {});
     return h("form", {
-      class: "stack panel", id: "promote-form",
+      class: "stack panel", id: `promote-form${suffix}`,
       onsubmit: async (ev) => {
         ev.preventDefault();
         if (!reason.value.trim()) {
           note.replaceChildren(h("div", { class: "note warn", role: "alert" }, "写一句为什么要提到更大的范围。"));
           return;
         }
+        const id = which ? which.value : items[0].id;
         go.disabled = true;
         note.replaceChildren(h("p", { class: "muted" }, "正在提…"));
         try {
-          const r = await api("POST", `/api/items/${enc(it.id)}/promote`, { to: to.value, reason: reason.value });
+          const r = await api("POST", `/api/items/${enc(id)}/promote`, { to: to.value, reason: reason.value });
           history.pushState(null, "", `#/proposals/${enc(r.proposal_id)}`);
           setTab("proposals");
           await showProposal(r.proposal_id, r.duplicate
@@ -532,11 +546,46 @@
         }
       },
     },
+    which ? h("label", {}, "提哪一条", which) : null,
     h("label", {}, "提到", to),
     h("label", {}, "理由（审核的人会看到）", reason),
     h("div", { class: "actions" }, go),
     note,
-    h("p", { class: "muted small" }, `批准以后在新的范围里写一条一样的，取代 ${it.scope} 里的这一条；能看到新范围的 agent 都会用上它。`));
+    h("p", { class: "muted small" }, hint));
+  }
+
+  // ---------- 可以晋升的 ----------
+
+  // 系统找的候选：几个岗位（或团队、项目）都写了的相近条目。挑一条做成晋升提议，批准以后才生效。
+  async function showPromotions() {
+    const data = await api("GET", "/api/promotions");
+    const cards = data.candidates.map((c, n) => {
+      const scopes = [...new Set(c.items.map((it) => it.scope))];
+      const pending = c.items.find((it) => it.pending);
+      const rows = c.items.map((it) => h("li", {},
+        h("a", { class: "row", href: `#/items/${enc(it.id)}` },
+          h("div", { class: "title" }, it.title),
+          h("div", { class: "meta" },
+            h("span", {}, `${it.scope} · ${kindWord(c.kind)}`),
+            h("span", {}, `第 ${it.revision} 版`),
+            it.pending ? badge("晋升提议在等审核", "open") : null))));
+      return h("section", { class: "candidate" },
+        h("h2", {}, `${scopes.join("、")} 都写了，建议提到${scopeWord(c.to)}`),
+        h("div", { class: "panel" }, h("ul", { class: "list" }, rows)),
+        pending
+          ? h("p", { class: "muted small" }, "已经有一条晋升提议在等审核：",
+            h("a", { href: `#/proposals/${enc(pending.pending)}` }, pending.pending))
+          : promoteForm({
+            items: c.items, targets: [c.to], suffix: `-${n}`,
+            reason: `${scopes.join("、")} 都写了相近的${kindWord(c.kind)}，提到 ${c.to} 以后大家用同一条。`,
+            hint: `批准以后在 ${c.to} 里写一条一样的，取代挑的那一条；另外几条留在原来的范围里，要收掉的话直接改上下文仓库里的 Markdown。`,
+          }));
+    });
+    render(
+      h("h1", {}, "可以晋升的条目"),
+      h("p", { class: "muted small" },
+        `系统找出几个岗位（或团队、项目）都写了的相近条目：同一类型，标题的词重合一半以上或标签相近。几个岗位在同一个团队里时建议提到团队，不然提到全公司；要提到的范围里已经有相近的就不再列。共 ${data.total} 组${data.total > data.limit ? `，只列前 ${data.limit} 组` : ""}${data.commit ? `；索引到提交 ${short(data.commit)}` : ""}。`),
+      ...(cards.length ? cards : [h("div", { class: "panel" }, h("div", { class: "empty" }, "现在没有可以晋升的条目。"))]));
   }
 
   // 改单条的纯文本：标题、标签、复核日期、正文。类型、范围不在这里改。

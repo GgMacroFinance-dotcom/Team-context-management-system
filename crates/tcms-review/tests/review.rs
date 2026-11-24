@@ -950,3 +950,95 @@ async fn promote_from_item_page() {
 
     f.store.drop_schema().await.unwrap();
 }
+
+/// 系统找的晋升候选：两个岗位都写了相近的条目，建议提到它们的团队；挑一条提了以后标成在等审核；
+/// 批准以后团队里有了相近的，不再列。
+#[tokio::test]
+async fn promotion_candidates_page() {
+    let Some(f) = fixture().await else { return };
+    // 一开始只有宏观岗位写了：没有候选。
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["total"], 0, "{v}");
+    assert_eq!(v["candidates"], json!([]));
+
+    // 数据岗位也进了研究团队，也写了一条相近的事实。
+    let data = "ctx_01JDX4M6Q8FFFFFFFFFFFFFFFF";
+    f.repo
+        .commit(
+            &[
+                put(
+                    "teams.yaml",
+                    "teams:\n  research:\n    roles: [macro, data]\n",
+                ),
+                put(
+                    "role-data/来源.md",
+                    &format!("## 宏观数据该从哪里取\n<!-- ctx id={data} kind=fact -->\n统计局。\n"),
+                ),
+            ],
+            "数据岗位",
+            &Author::default(),
+        )
+        .unwrap();
+    tcms_index::reindex(&f.repo, &f.store, false).await.unwrap();
+    assert!(f.live.refresh().await.unwrap().is_some());
+
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["total"], 1, "{v}");
+    let c = &v["candidates"][0];
+    assert_eq!(c["to"], "team:research");
+    assert_eq!(c["kind"], "fact");
+    let ids: Vec<&str> = c["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|it| it["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [data, MACRO]);
+    assert!(c["items"][0]["pending"].is_null());
+
+    // agent 的令牌看不了。
+    let r = send(
+        &f.app,
+        "GET",
+        "/api/promotions",
+        Some(&f.agent_secret),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+
+    // 挑宏观那条提了：标成在等审核。
+    let r = post(
+        &f,
+        &format!("/api/items/{MACRO}/promote"),
+        json!({"to": "team:research", "reason": "两个岗位都写了"}),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let proposal = r.json()["proposal_id"].as_str().unwrap().to_owned();
+    let v = get(&f, "/api/promotions").await;
+    let items = v["candidates"][0]["items"].as_array().unwrap();
+    assert_eq!(items[1]["id"], MACRO);
+    assert_eq!(items[1]["pending"], proposal.as_str());
+    assert!(items[0]["pending"].is_null());
+
+    // 批准以后：团队里有了相近的一条，数据岗位那条不再列。
+    let r = post(&f, &format!("/api/proposals/{proposal}/accept"), json!({})).await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    // 服务里收到通知以后换新索引；这里直接换。
+    assert!(f.live.refresh().await.unwrap().is_some());
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["total"], 0, "{v}");
+
+    f.store.drop_schema().await.unwrap();
+}
