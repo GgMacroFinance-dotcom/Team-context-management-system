@@ -241,7 +241,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 ## 8. 以后和 AFFiNE 同步
 
-方向已定，等第一版跑通再细化。现在的想法：一个 Markdown 文件对应一个 Yjs 文档，用 yrs 读写。人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成建议。CRDT 只在这座桥上用，真相还是 git。
+方案草案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，等维护者定）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
 
 ## 9. 依赖
 
@@ -268,6 +268,7 @@ Edited-by: 王审核（tok_01JDX4...）
 | 测试审核页的接口（只在测试里） | tower 0.5（util）、http-body-util 0.1 | MIT |
 
 | 以后：Yjs | yrs 0.28 | MIT |
+| 以后：和 AFFiNE 同步时自己写的 socket.io 客户端（`affine-sync.md` 第 6 节） | tokio-tungstenite | MIT |
 
 第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
