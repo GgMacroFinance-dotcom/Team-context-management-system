@@ -102,6 +102,15 @@ pub(crate) async fn me(Extension(who): Extension<Reviewer>) -> Json<Value> {
     Json(json!({"name": who.name, "token_id": who.token_id}))
 }
 
+/// 和远端同步的情况：配的哪个远端、最近一次的结果、合并不了时怎么合并。`now_ms` 是服务器现在的时间，
+/// 网页拿它算“几分钟前”，不受浏览器时钟的影响。
+pub(crate) async fn remote(State(state): State<AppState>) -> ApiResult {
+    let mut v = serde_json::to_value(state.writer.remote_status())
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    v["now_ms"] = json!(crate::writer::now_ms());
+    Ok(Json(v))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
     status: Option<String>,

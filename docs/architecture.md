@@ -208,10 +208,11 @@ Edited-by: 王审核（tok_01JDX4...）
   - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
 - 审核页（`crates/tcms-review`，第 5 步）：和 `/mcp` 在同一个 axum 服务里（`--stdio` 时没有）。
   - `/review` 是一个静态页面，`app.js`、`app.css` 编进二进制（`include_str!`），不用构建前端，不加载外部资源；`/` 跳到 `/review`。
-  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
+  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`remote`（和远端同步的情况，下面）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
   - 令牌存在浏览器的 sessionStorage 里（关掉标签页就没了），每次请求放在请求头里，不用 cookie，所以没有跨站请求伪造的问题。页面只用 `textContent` 和建元素写内容，不拼 HTML。
   - 响应头：`Content-Security-Policy`（`default-src 'none'`，脚本、样式、请求只许同源，`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。和 `/mcp` 一样只接受 `Host` 是本机或 `--allowed-host` 写了的请求。
   - 出错时回 `{"error": 一句话, "code": ..., "current": 现在的版本号（版本落后时）}`：没找到 404，不是待审核、版本落后、目标没了、仓库正忙（HEAD 变了或工作区不干净）409，参数不对 400。
+  - 和远端同步的情况：写入线程每次和远端打交道（定时同步、批准、改单条）以后，把结果记在内存里（`RemoteStatus`：远端、同步间隔、最近一次的时间和拉推结果、最近一次没出错的时间、合并不了时的说明；服务重启以后从头记）。`GET /api/remote` 返回它和服务器现在的时间（`now_ms`，网页拿它算“几分钟前”，不受浏览器时钟的影响）。页面登录以后、每 30 秒、每次批准或保存以后取一次，在顶上显示一行；没配远端时不显示。合并不了的说明从批准、改单条回的错误或同步结果里取，下次拉成功了就清掉。
   - 提交者是审核的人的名字，邮箱从 `TCMS_GIT_EMAIL` 读（没设时 `tcms@localhost`）；上下文仓库从 `--repo` 或 `TCMS_REPO` 读，打不开时启动时提醒，页面能看，写会失败。
 - 鉴权：Bearer 令牌（`tcms_` 加 64 位十六进制，32 字节随机数），库里只存 SHA-256。令牌绑定身份（岗位、团队、能声明的项目），身份决定范围（`spec.md` 6.1）。令牌用 `tcms token add|list|revoke` 管，发和吊销记进 `audit`。
 
