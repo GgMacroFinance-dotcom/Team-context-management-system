@@ -97,7 +97,7 @@ docker compose run --rm tcms reindex
 sudo chown -R 10002:10002 ./context
 ```
 
-人直接在仓库里改了、提交以后，运行 `docker compose run --rm tcms reindex`，或者重启 tcms（启动时会同步一次）。
+人直接在仓库里改了、提交以后，运行 `docker compose run --rm tcms reindex`，或者重启 tcms（启动时会同步一次）。新写的标题还没有 id 时不进索引，先运行 `docker compose run --rm tcms assign-ids`。推到下一节的远端时不用，服务拉下来时自动补。
 
 `teams.yaml`（团队有哪些岗位）现在只能这样直接提交进仓库（或者推到下一节的远端），导入和提议都不管它。
 
@@ -130,7 +130,7 @@ sudo chown -R 10002:10002 ./context
    docker compose logs tcms | grep 远端
    ```
 
-**人怎么改**：克隆远端，改 Markdown，提交，推到 `main`。最多等一个同步间隔，服务拉下来、更新索引，运行中的检索索引跟着换。新写的标题还没有 id 时不进索引，在自己的克隆里跑一次 `tcms assign-ids` 再推，或者 `docker compose exec tcms tcms assign-ids`。
+**人怎么改**：克隆远端，改 Markdown，提交，推到 `main`。最多等一个同步间隔，服务拉下来、更新索引，运行中的检索索引跟着换。新写的标题不用自己写 id：服务拉下来时补上，做成一个“补 id：远端新来的 N 条”的提交推回去，日志里也有一行。接着改之前先 `git pull`，拿到这些 id。
 
 **合并不了时**（服务器批准了一条，同时有人在远端改了同一处）：
 - 服务把服务器这边的提交推到远端的旁支 `tcms/main-unmerged`。日志、`tcms sync` 和审核页上批准时的回答都会写明哪些文件冲突。
@@ -168,7 +168,7 @@ git pull && docker compose up -d --build
 
   索引丢了可以从仓库重建：`tcms reindex --full`。
 
-**还没有的**：远端的 webhook（推上去马上同步，现在最多等一个同步间隔）；人推上去的新条目自动补 id；审核页上显示远端的状态。
+**还没有的**：远端的 webhook（推上去马上同步，现在最多等一个同步间隔）；审核页上显示远端的状态。
 
 ## 实测结果
 

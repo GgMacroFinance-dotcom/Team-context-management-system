@@ -1004,3 +1004,139 @@ async fn accept_and_edit_with_a_remote() {
 
     f.store.drop_schema().await.unwrap();
 }
+
+/// 人推上去的新标题没有 id：同步（和批准）拉下来以后补上 id，做成一个提交推回去，条目进了索引。
+/// 只扫拉下来改到的文件；不在范围目录里的文件不管。远端是本机的裸仓库。
+#[tokio::test]
+async fn pulled_items_get_ids() {
+    let Some(f) = fixture().await else { return };
+    let (s, w, dir) = (&f.store, &f.macro_who, f.path.as_path());
+    let remote_dir = tempfile::tempdir().unwrap();
+    let base = remote_dir.path();
+    human_git(base, &["init", "-q", "--bare", "remote.git"]);
+    let bare = base.join("remote.git");
+    let remote = Remote::new(bare.to_str().unwrap(), Some("main"), false).unwrap();
+    let author = Author::default();
+    let r = sync(&f.repo, s, &remote, &author).await.unwrap();
+    assert!(r.pushed_new && r.ids.is_none(), "{r:?}");
+
+    // 服务器这边有一条没有 id 的（人直接在服务器上提交的），这次拉下来的没改到它，不管。
+    f.repo
+        .commit(
+            &[put("org/服务器上的.md", "## 服务器上写的\n没有 id。\n")],
+            "服务器上直接加的",
+            &author,
+        )
+        .unwrap();
+    // 人加了两条没有 id 的（一条有属性注释、一条什么都没有），还有一个不在范围目录里的文件。
+    human_git(base, &["clone", "-q", bare.to_str().unwrap(), "human"]);
+    let human = base.join("human");
+    let new_file = "# 人写的\n\n## 报告用中文\n<!-- ctx kind=rule -->\n报告一律用中文写。\n\n## 图表标注单位\n图表都标单位。\n";
+    std::fs::write(human.join("org/人写的.md"), new_file).unwrap();
+    std::fs::write(human.join("README.md"), "## 这个仓库\n说明。\n").unwrap();
+    human_git(&human, &["add", "."]);
+    human_git(&human, &["commit", "-q", "-m", "人加了两条"]);
+    human_git(&human, &["push", "-q", "origin", "main"]);
+    let human_head = human_git(&human, &["rev-parse", "HEAD"]);
+
+    let r = sync(&f.repo, s, &remote, &author).await.unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert!(r.head_moved && r.pushed_new, "{r:?}");
+    assert!(
+        r.pulled.as_deref().unwrap().starts_with("合并"),
+        "服务器上有自己的提交，要合并：{r:?}"
+    );
+    let ids = r.ids.clone().expect("补了 id");
+    assert_eq!(
+        ids.items
+            .iter()
+            .map(|i| (i.path.as_str(), i.title.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("org/人写的.md", "报告用中文"),
+            ("org/人写的.md", "图表标注单位")
+        ]
+    );
+    assert!(
+        r.summary().contains("补 id：远端新来的 2 条"),
+        "{}",
+        r.summary()
+    );
+    // 补 id 的提交在合并提交后面，推上去了。
+    let head = git(dir, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(head, ids.commit);
+    assert_eq!(human_git(&bare, &["rev-parse", "refs/heads/main"]), head);
+    let message = git(dir, &["log", "-1", "--format=%B"]);
+    assert!(message.starts_with("补 id：远端新来的 2 条\n"), "{message}");
+    let merge = git(dir, &["log", "-1", "--format=%P"]).trim().to_owned();
+    assert!(
+        git(dir, &["log", "-1", "--format=%P", &merge]).contains(&human_head),
+        "合并提交的一边是人的提交"
+    );
+    // 只插了 id，别的字节不变；不在范围目录里的、服务器上那条都没动。
+    let text = read(dir, "org/人写的.md");
+    assert_eq!(
+        text,
+        format!(
+            "# 人写的\n\n## 报告用中文\n<!-- ctx id={} kind=rule -->\n报告一律用中文写。\n\n## 图表标注单位\n<!-- ctx id={} -->\n图表都标单位。\n",
+            ids.items[0].id, ids.items[1].id
+        )
+    );
+    assert_eq!(read(dir, "README.md"), "## 这个仓库\n说明。\n");
+    assert_eq!(
+        read(dir, "org/服务器上的.md"),
+        "## 服务器上写的\n没有 id。\n"
+    );
+    // 两条都进了索引，是生效的。
+    for i in &ids.items {
+        let row = s.get_item(&i.id).await.unwrap().expect("进了索引");
+        assert_eq!(
+            (row.status.as_str(), row.title.as_str()),
+            ("active", i.title.as_str())
+        );
+    }
+    // 人拉回去就有 id 了。
+    human_git(&human, &["pull", "-q", "--ff-only"]);
+    assert_eq!(read(&human, "org/人写的.md"), text);
+
+    // 什么都没变时再同步一次：不补、不提交。
+    let r = sync(&f.repo, s, &remote, &author).await.unwrap();
+    assert!(r.ids.is_none() && !r.head_moved && !r.pushed_new, "{r:?}");
+    assert_eq!(git(dir, &["rev-parse", "HEAD"]).trim(), head);
+
+    // 批准之前拉下来的也补：人又加了一条，批准一条提议；补 id 的提交在批准的提交前面，一起推上去。
+    std::fs::write(
+        human.join("team-research/新规矩.md"),
+        "## 周报周五发\n周报每周五下午发出。\n",
+    )
+    .unwrap();
+    human_git(&human, &["add", "."]);
+    human_git(&human, &["commit", "-q", "-m", "人又加了一条"]);
+    human_git(&human, &["push", "-q", "origin", "main"]);
+    let p = propose_ok(s, w, json!({"action": "update", "item_id": MACRO, "draft": {"body": "CPI、PPI 都用国家统计局的数。"}, "reason": "PPI 也一样"})).await;
+    let mut o = opts();
+    o.remote = Some(remote.clone());
+    let a = accept(&f.repo, s, &p.proposal_id, &o).await.unwrap();
+    let rep = a.remote.clone().expect("配了远端");
+    assert!(rep.errors.is_empty() && rep.pushed_new, "{rep:?}");
+    let ids = rep.ids.expect("补了 id");
+    assert_eq!(ids.items.len(), 1);
+    assert_eq!(ids.items[0].title, "周报周五发");
+    assert_eq!(
+        git(dir, &["log", "-1", "--format=%P"]).trim(),
+        ids.commit,
+        "批准的提交接在补 id 的提交后面"
+    );
+    assert_eq!(
+        human_git(&bare, &["rev-parse", "refs/heads/main"]),
+        a.commit
+    );
+    let row = s
+        .get_item(&ids.items[0].id)
+        .await
+        .unwrap()
+        .expect("进了索引");
+    assert_eq!(row.scope, "team:research");
+
+    f.store.drop_schema().await.unwrap();
+}

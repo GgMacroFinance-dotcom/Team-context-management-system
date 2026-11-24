@@ -13,8 +13,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use tcms_core::{Kind, Warning, assign_ids, scope_of_path};
-use tcms_git::{Author, ContextRepo, FileEdit, Remote, RemoteError};
+use tcms_core::{Kind, Warning};
+use tcms_git::{Author, ContextRepo, Remote, RemoteError};
 use tcms_store::Store;
 use tcms_write::RemoteReport;
 
@@ -257,7 +257,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::AssignIds => {
             let repo = open_repo(&cli.repo)?;
-            pull_first(&repo, remote.as_ref()).await?;
+            // 拉下来的文件下面补 id 时一起扫，这里不用单独补。
+            pull_first(&repo, remote.as_ref(), false).await?;
             if assign_ids_cmd(&repo)? {
                 push_after(&repo, remote.as_ref()).await;
             }
@@ -265,7 +266,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Import { src, into } => {
             let repo = open_repo(&cli.repo)?;
-            pull_first(&repo, remote.as_ref()).await?;
+            pull_first(&repo, remote.as_ref(), true).await?;
             import::run(&repo, &src, &into, &author())?;
             push_after(&repo, remote.as_ref()).await;
             Ok(ExitCode::SUCCESS)
@@ -467,14 +468,26 @@ fn remote(cli: &Cli) -> Result<Option<Remote>> {
 }
 
 /// 不经过提交队列的写（导入、补 id）之前先从远端拉。合并不了就停下；连不上只提醒，照样在本地提交。
-async fn pull_first(repo: &ContextRepo, remote: Option<&Remote>) -> Result<()> {
+/// `assign` 为真时，拉下来的条目里没有 id 的补上（和服务同步时一样），提交在后面的写之前。
+async fn pull_first(repo: &ContextRepo, remote: Option<&Remote>, assign: bool) -> Result<()> {
     let Some(remote) = remote else {
         return Ok(());
     };
     let dir = repo.workdir().context("上下文仓库没有工作区")?;
+    let before = repo.head()?;
     match remote.pull(dir, &author()).await {
         Ok(p) if p.moved_head() => {
             println!("先从远端 {} 拉了：{p}。", remote.display());
+            if assign && let Some(done) = tcms_write::assign_since(repo, before, &author())? {
+                println!(
+                    "拉下来的条目有 {} 条没有 id，补上了，提交 {}：",
+                    done.items.len(),
+                    done.commit
+                );
+                for i in &done.items {
+                    println!("  {}  {}  {}", i.path, i.id, i.title);
+                }
+            }
             Ok(())
         }
         Ok(_) => Ok(()),
@@ -568,38 +581,17 @@ fn print_warnings(warnings: &[Warning]) {
 
 /// 补 id。做了提交时返回 `true`。
 fn assign_ids_cmd(repo: &ContextRepo) -> Result<bool> {
-    let Some(head) = repo.head()? else {
+    if repo.head()?.is_none() {
         println!("仓库还没有提交，没有要补的。");
         return Ok(false);
-    };
-    let mut edits = Vec::new();
-    let mut lines = Vec::new();
-    for (path, blob) in repo.files(head)? {
-        if scope_of_path(&path).is_none() {
-            continue;
-        }
-        let Ok(text) = String::from_utf8(repo.read_blob(blob)?) else {
-            continue;
-        };
-        if let Some((new, ids)) = assign_ids(&path, &text) {
-            for (id, title) in &ids {
-                lines.push(format!("{path}  {id}  {title}"));
-            }
-            edits.push(FileEdit {
-                path,
-                content: Some(new.into_bytes()),
-            });
-        }
     }
-    if edits.is_empty() {
+    let Some(done) = tcms_write::assign_all(repo, &author())? else {
         println!("所有条目都有 id 了。");
         return Ok(false);
-    }
-    let message = format!("补 id：{} 条\n\n{}\n", lines.len(), lines.join("\n"));
-    let commit = repo.commit(&edits, &message, &author())?;
-    println!("补了 {} 条 id，提交 {commit}：", lines.len());
-    for l in &lines {
-        println!("  {l}");
+    };
+    println!("补了 {} 条 id，提交 {}：", done.items.len(), done.commit);
+    for i in &done.items {
+        println!("  {}  {}  {}", i.path, i.id, i.title);
     }
     println!("接着运行 tcms reindex 更新索引。");
     Ok(true)
