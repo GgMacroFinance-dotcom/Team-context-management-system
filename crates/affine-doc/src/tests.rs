@@ -572,7 +572,8 @@ fn random_ids_look_like_affine_ids() {
 
 /// 和 AFFiNE 互通的检查，平时不跑（要外面的文件）：
 ///
-/// - `AFFINE_DOC_FIXTURE=<AFFiNE 导出的文档快照>`：读出来、按条目切开、打印 Markdown；
+/// - `AFFINE_DOC_FIXTURE=<AFFiNE 导出的文档快照>`：读出来、按条目切开、打印 Markdown，再列出块的种类和结构检查的结果；
+/// - `AFFINE_DOC_ROOT_FIXTURE=<AFFiNE 导出的根文档快照>`：读出工作区名字和文档列表；
 /// - `AFFINE_DOC_DUMP=<路径>`：把 `SAMPLE` 写成一篇文档，Yjs 更新存到这个路径，给 yjs 去读。
 #[test]
 #[ignore]
@@ -590,6 +591,27 @@ fn interop_with_affine_files() {
             if let Section::Item(i) = s {
                 println!("---- 条目「{}」 lossy={}", i.title, i.lossy);
             }
+        }
+        let tree = crate::schema::read_tree(&doc).unwrap();
+        let mut kinds: Vec<&str> = tree.walk().iter().map(|b| b.flavour.as_str()).collect();
+        kinds.sort();
+        kinds.dedup();
+        println!("---- 块的种类：{kinds:?}");
+        println!("---- 结构检查：{:?}", crate::schema::check_tree(&tree));
+    }
+    if let Ok(path) = std::env::var("AFFINE_DOC_ROOT_FIXTURE") {
+        let bytes = std::fs::read(&path).unwrap();
+        let doc = Doc::new();
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
+        let meta = crate::workspace::read_meta(&doc);
+        println!("---- 工作区：{:?}，{} 篇文档", meta.name, meta.pages.len());
+        for p in &meta.pages {
+            println!(
+                "---- {} 「{}」 tags={:?} trash={}",
+                p.id, p.title, p.tags, p.trash
+            );
         }
     }
     if let Ok(path) = std::env::var("AFFINE_DOC_DUMP") {

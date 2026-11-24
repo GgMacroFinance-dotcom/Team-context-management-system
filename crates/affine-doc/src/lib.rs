@@ -9,12 +9,14 @@
 //! - [`markdown`]：Markdown 子集和块互相转换；
 //! - [`sections`]：按二级标题块切成一条一条；
 //! - [`workspace`]：根文档里的文档列表、文件夹树、文档属性这几张表；
+//! - [`schema`]：全部块的种类、版本、能放在哪里；不挑块的读法和结构检查；
 //! - [`order`]：AFFiNE 列表用的排序键。
 
 pub mod doc;
 pub mod markdown;
 pub mod model;
 pub mod order;
+pub mod schema;
 pub mod sections;
 pub mod workspace;
 
@@ -25,6 +27,8 @@ pub use markdown::{roundtrips, same_content, to_blocks, to_markdown};
 pub use model::{Block, Content, ListKind, Marks, ParagraphKind, Span, plain_text};
 pub use sections::{Item, Section, split};
 
+#[cfg(test)]
+mod schema_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
