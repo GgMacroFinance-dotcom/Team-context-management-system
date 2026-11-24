@@ -135,7 +135,7 @@ A2（TCMS #26）合并以后，把 `crates/tcms-affine-client` 原样改名成 `
   - `import_docs`：包里每篇文档换一个新的文档 id，文档之间的引用（文字里的行内引用、嵌入文档块的 `pageId`）跟着换，指向包外的不动；全部写对了才记进根文档的文档列表，有一篇不对就一篇都不记。附件由调用方传到附件存储。和 BlockSuite 不同：块 id 不换，因为每篇都是新文档，块 id 不会撞。
 - 新依赖 zip 9（MIT），只开 deflate（zlib-rs），见 `architecture.md`。
 - 测试：新加 6 个。导出再读回来逐项一样、附件只取一次、缺的附件记下来；导入换 id、引用跟着换、记进文档列表；`doc::create` 写的文档过一遍包，Markdown 不变；跳过杂文件、坏 JSON 和不是文档的快照报错；有一篇坏的就一篇都不导入；MIME 到扩展名。
-- 和真 AFFiNE 对照：AFFiNE 仓库里 MIT 的模板有 17 个 AFFiNE 导出的 zip（onboarding 一个、白板模板 16 个），一共 18 篇文档、47 个附件，在本地手动跑了一遍忽略的测试 `interop_with_affine_bundle`（`AFFINE_DOC_BUNDLE=<文件>`）。
+- 和真 AFFiNE 对照：AFFiNE 仓库里 MIT 的模板有 17 个 AFFiNE 导出的 zip（onboarding 一个、白板模板 16 个），一共 18 篇文档、45 个附件，在本地手动跑了一遍忽略的测试 `interop_with_affine_bundle`（`AFFINE_DOC_BUNDLE=<文件>`）。
   - 全部读得出来，18 篇的结构检查都没有问题，附件一个不缺。
   - 每篇转进 Yjs 再转回快照，差别还是 5.4 那两种（补上版本号，`1.0` 写成 `1`）。
   - 整包导入再导出，文档和附件个数不变，`unzip -t` 检查新包没有错。
