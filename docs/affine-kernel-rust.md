@@ -111,6 +111,21 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 
 A2（TCMS #26）合并以后，把 `crates/tcms-affine-client` 原样改名成 `crates/affine-sync-client`（`git mv`，代码不改，只改包名、引用和注释）。对着真 AFFiNE 的测试用的环境变量本来就是 `AFFINE_TEST_URL`、`AFFINE_TEST_EMAIL`、`AFFINE_TEST_PASSWORD`，不带 TCMS，不用改。A3 的同步循环照旧写在 `tcms-affine` 里，依赖改成 `affine-sync-client`。
 
+### 5.4 K2 第一个 PR 做了什么（2026-11-24）
+
+- `snapshot`：BlockSuite 的文档快照（AFFiNE 导出的 `.snapshot.json`）和 Yjs 文档之间互相转换（`to_snapshot`、`from_snapshot`）。
+  - 文字和原样存的值（BlockSuite 叫 `Boxed`）都按快照里的标记转。别的对象在 Yjs 里存成 Y.Map，数组存成 Y.Array。
+  - 白板的 `elements` 和拍平存的表格按各自的规矩转。
+  - 写文字时，前一段有、这一段没有的格式明确写成 null。不这样做的话 Yjs 会让后一段沿用前一段的格式。
+  - `from_snapshot` 先写进一篇临时文档，整篇写对了再应用到目标文档，所以中途出错不会留下写了一半的文档。
+  - 快照里没写版本号的块，按 `schema` 表补上。
+- 测试：新加 4 个。手写的快照覆盖带格式和行内引用的文字、表格、白板元素、Boxed、嵌套对象和数组，转进 Yjs 再转回来逐字节一样；另外检查了存成 Yjs 的样子、`doc::create` 写的文档转成快照再写回、坏快照不碰目标文档。
+- 和真 AFFiNE 对照：AFFiNE 仓库里 MIT 的模板（`packages/frontend/templates`，onboarding 和白板模板）有 18 个快照，在本地手动跑了一遍。
+  - 18 个的结构检查都没有问题。
+  - 转回快照以后只有两种差别：快照里没写版本号的块被补上了版本号；JSON 里 `1.0` 写成了 `1`（在 JS 里是同一个数）。别的逐项一样。
+  - 这个对照用忽略的测试 `interop_with_affine_snapshot` 跑：`AFFINE_DOC_SNAPSHOT=<文件> cargo test -p affine-doc -- --ignored`。
+- 下一步：整个工作区的导出包（`.bs.zip`：快照加 `assets/` 里的附件）和 Markdown 补表格、图片。
+
 合计约 6 到 8 个 PR、5 到 7 周（两位工程师加 Claude；Claude 能写大部分代码，工程师主要读代码和对真 AFFiNE 验收）。
 
 ## 6. 乙要做什么（只列出来，先不做）

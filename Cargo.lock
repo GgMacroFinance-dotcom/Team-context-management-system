@@ -9,6 +9,7 @@ dependencies = [
  "comrak",
  "getrandom 0.4.3",
  "regex",
+ "serde_json",
  "similar",
  "thiserror",
  "yrs",

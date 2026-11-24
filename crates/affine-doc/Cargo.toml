@@ -13,6 +13,7 @@ workspace = true
 comrak.workspace = true
 getrandom.workspace = true
 regex.workspace = true
+serde_json.workspace = true
 similar.workspace = true
 thiserror.workspace = true
 yrs.workspace = true
