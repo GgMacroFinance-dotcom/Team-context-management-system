@@ -1,4 +1,4 @@
-//! 块的模型：本系统认得的几种 AFFiNE 块（`docs/affine-sync.md` 第 4 节），别的一律当成“不转换的块”原样留着。
+//! 块的模型：认得的几种 AFFiNE 块（TCMS `docs/affine-sync.md` 第 4 节），别的一律当成“不转换的块”原样留着。
 
 /// 行内格式。AFFiNE 里是 Y.Text 上的属性：`bold`、`italic`、`strike`、`code` 是 `true`，`link` 是网址。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]

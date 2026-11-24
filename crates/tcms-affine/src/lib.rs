@@ -1,20 +1,7 @@
-//! 和 AFFiNE 同步的第一步（`docs/affine-sync.md` 第 7 节 A1）：用 yrs 读写 AFFiNE 的文档结构，
-//! 按二级标题块切成条目，Markdown 子集和块互相转换。
+//! 和 AFFiNE 同步（`docs/affine-sync.md`）本系统这一侧。
 //!
-//! 只处理一篇文档的 Yjs 内容，不连网络、不碰上下文仓库和数据库：连 AFFiNE 是 A2，
-//! 同步循环是 A3。依据是 AFFiNE 0.27.5 的文档结构（只读了 MIT 部分的设计，没复制代码）。
+//! 读写 AFFiNE 文档结构的代码（A1）2026-11-24 搬进了不依赖本系统的 `affine-doc`
+//! （`docs/affine-kernel-rust.md` 的 K1），这里先原样转出去，调用的地方不用改。
+//! 同步循环（A3）以后写在这里。
 
-pub mod doc;
-pub mod markdown;
-pub mod model;
-pub mod sections;
-
-pub use doc::{
-    Error, Ids, Page, RandomIds, create, insert_item, read, remove_item, set_title, update_item,
-};
-pub use markdown::{roundtrips, same_content, to_blocks, to_markdown};
-pub use model::{Block, Content, ListKind, Marks, ParagraphKind, Span, plain_text};
-pub use sections::{Item, Section, split};
-
-#[cfg(test)]
-mod tests;
+pub use affine_doc::*;

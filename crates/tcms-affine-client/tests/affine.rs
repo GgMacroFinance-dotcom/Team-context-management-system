@@ -7,15 +7,14 @@
 
 use std::time::Duration;
 
-use tcms_affine::{RandomIds, Section};
+use affine_doc::{RandomIds, Section, workspace};
 use tcms_affine_client::{
     Client, Config, Credentials, DocMode, Error, Intent, SyncConnection, SyncEvent,
     comment_content, comment_text,
 };
-use yrs::types::ToJson;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{Any, Array, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, StateVector, Transact, Update};
+use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
 
 fn config() -> Option<Config> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
@@ -39,32 +38,13 @@ fn apply(doc: &Doc, update: &[u8]) {
 }
 
 fn markdown(doc: &Doc) -> String {
-    tcms_affine::to_markdown(&tcms_affine::read(doc).unwrap().blocks)
+    affine_doc::to_markdown(&affine_doc::read(doc).unwrap().blocks)
 }
 
-/// 只在测试里：工作区根文档的 `meta.pages` 里加一篇（读写根文档以后由 `affine-doc` 管）。
+/// 工作区根文档的 `meta.pages` 里加一篇，返回这次的差量。
 fn add_page(root: &Doc, id: &str, title: &str) -> Vec<u8> {
-    let meta = root.get_or_insert_map("meta");
     let sv = root.transact().state_vector();
-    {
-        let mut t = root.transact_mut();
-        let pages = match meta
-            .get(&t, "pages")
-            .and_then(|v| v.cast::<yrs::ArrayRef>().ok())
-        {
-            Some(p) => p,
-            None => meta.insert(&mut t, "pages", ArrayPrelim::default()),
-        };
-        let page = pages.push_back(
-            &mut t,
-            MapPrelim::from([
-                ("id".to_owned(), Any::from(id)),
-                ("title".to_owned(), Any::from(title)),
-                ("createDate".to_owned(), Any::from(1.7e12)),
-            ]),
-        );
-        page.insert(&mut t, "tags", ArrayPrelim::default());
-    }
+    workspace::upsert_doc_meta(root, &workspace::DocMeta::new(id, title, 1.7e12));
     root.transact().encode_state_as_update_v1(&sv)
 }
 
@@ -116,10 +96,10 @@ async fn sync_with_a_real_affine() {
     );
     let page = Doc::new();
     let md = "## 第一条\n\n正文 **粗体** 和 `代码`\n\n- 列表\n  - 下一级\n\n## 第二条\n\n1. 编号\n";
-    tcms_affine::create(
+    affine_doc::create(
         &page,
         "测试文档",
-        &tcms_affine::to_blocks(md),
+        &affine_doc::to_blocks(md),
         &mut RandomIds,
     )
     .unwrap();
@@ -138,17 +118,16 @@ async fn sync_with_a_real_affine() {
     let back = Doc::new();
     apply(&back, &loaded.update);
     assert_eq!(markdown(&back), md.trim_end());
-    assert_eq!(tcms_affine::read(&back).unwrap().title, "测试文档");
+    assert_eq!(affine_doc::read(&back).unwrap().title, "测试文档");
     let loaded_root = a.load_doc(&ws, &ws, None).await.unwrap().unwrap();
     let root_back = Doc::new();
     apply(&root_back, &loaded_root.update);
-    let meta = root_back
-        .get_or_insert_map("meta")
-        .to_json(&root_back.transact())
-        .to_string();
+    let pages = workspace::read_meta(&root_back).pages;
     assert!(
-        meta.contains("tcmsTest01") && meta.contains("测试文档"),
-        "{meta}"
+        pages
+            .iter()
+            .any(|p| p.id == "tcmsTest01" && p.title == "测试文档"),
+        "{pages:?}"
     );
     assert!(a.load_doc(&ws, "noSuchDoc", None).await.unwrap().is_none());
 
@@ -160,7 +139,7 @@ async fn sync_with_a_real_affine() {
         &b.load_doc(&ws, doc_id, None).await.unwrap().unwrap().update,
     );
     let item = |doc: &Doc, n: usize| {
-        tcms_affine::split(&tcms_affine::read(doc).unwrap().blocks)
+        affine_doc::split(&affine_doc::read(doc).unwrap().blocks)
             .into_iter()
             .filter_map(|s| match s {
                 Section::Item(i) => Some(i),
@@ -171,8 +150,8 @@ async fn sync_with_a_real_affine() {
     };
     let sv = page.transact().state_vector();
     let it = item(&page, 1);
-    let body = tcms_affine::to_blocks("1. 编号\n\nA 加的一段");
-    tcms_affine::update_item(
+    let body = affine_doc::to_blocks("1. 编号\n\nA 加的一段");
+    affine_doc::update_item(
         &page,
         it.heading_id.as_deref().unwrap(),
         &it.title,
@@ -215,8 +194,8 @@ async fn sync_with_a_real_affine() {
     assert!(saw_disconnect);
     let sv = b_doc.transact().state_vector();
     let it = item(&b_doc, 0);
-    let body = tcms_affine::to_blocks("正文 **粗体** 和 `代码`\n\nB 在重连以后加的");
-    tcms_affine::update_item(
+    let body = affine_doc::to_blocks("正文 **粗体** 和 `代码`\n\nB 在重连以后加的");
+    affine_doc::update_item(
         &b_doc,
         it.heading_id.as_deref().unwrap(),
         &it.title,

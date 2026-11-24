@@ -134,7 +134,7 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 
 ### 7.1 A1 做了什么（2026-11-24）
 
-代码在 `crates/tcms-affine`，只是一个库：不连网络、不碰上下文仓库和数据库，A3 的同步循环才用它。
+代码原来在 `crates/tcms-affine`，2026-11-24 搬进了不依赖本系统的 `crates/affine-doc`（`affine-kernel-rust.md` 的 K1），`tcms-affine` 原样转出。它只是一个库：不连网络、不碰上下文仓库和数据库，A3 的同步循环才用它。
 
 - 读（`read`）：从页面块往下走，把不是只在白板里显示的 note（`prop:displayMode` 不是 `edgeless`）里的块接起来。认得的块是段落（正文、h1–h6、引用）、列表（圆点、编号、待办）、代码、分隔线；行内格式认粗体、斜体、删除线、行内代码、链接。别的块（图片、表格、数据库、嵌入……）变成“不转换的块”，在 Markdown 里写成一行占位注释 `<!-- affine block=<id> flavour=<flavour> 这一块只在 AFFiNE 里，没有同步 -->`。AFFiNE 有、Markdown 写不出来的东西（下划线、颜色这类别的格式，行内嵌入，段落下面的子块，折叠列表）照样读出文字，但这一块标成“转换有损失”。
 - 切条目（`split`）：二级标题开始一条，到下一个一级或二级标题为止；第一个二级标题前面的和一级标题不算条目。每一条带着它那个二级标题块的 id（和上下文仓库里条目 id 的对应表 `affine_items` 在 A3 做）。
@@ -142,18 +142,18 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 - 写（`create`、`set_title`、`update_item`、`insert_item`、`remove_item`）：新文档写成页面块、白板块、一个 note，块的 `sys:version` 和 0.27.5 一样，只写必要的属性（别的由 BlockSuite 加载时补默认值）。改一条时标题块的 id 不变，正文按块比较（Myers 差异，按每一块单独转成的 Markdown 比），只动变了的块：没变的块连同 Markdown 写不出的格式原样留着；占位注释对应的块不删、可以跟着挪位置；空段落留在原处。插文字一律带上格式属性（Yjs 里不带属性插进去会沿用前一个字的格式）。
 - 客户端 id：AFFiNE 用的 yjs 13.6 是 32 位，yrs 打开 `small-client` 特性一样是 32 位。块 id 是 10 个字符的随机串，和 AFFiNE 自己生成的样子一样。
 
-测试：`cargo test -p tcms-affine` 13 个单元测试，都是自己造的文档：Markdown 子集往返、转义、中文标点、不转换的块、写进去再读出来（也编码成 Yjs 更新再应用一遍）、按条目切、改一条只动变了的块、插入删除条目、占位注释、Markdown 写不出的格式不丢、空段落、嵌套列表和只在白板里的 note。
+测试：`cargo test -p affine-doc` 里原来 A1 的 13 个单元测试，都是自己造的文档：Markdown 子集往返、转义、中文标点、不转换的块、写进去再读出来（也编码成 Yjs 更新再应用一遍）、按条目切、改一条只动变了的块、插入删除条目、占位注释、Markdown 写不出的格式不丢、空段落、嵌套列表和只在白板里的 note。
 
 另外在临时目录里手动对照过两样，没有放进 CI（要 Node 和 AFFiNE 的仓库）：
 
 - Rust 写的文档编码成更新，用 yjs 13.6.21 读：块的种类、`sys:version`、`sys:children`、带格式的文字、32 位客户端 id 都对；在 JS 里加一个块，Rust 读回来也对。
 - AFFiNE 仓库里 MIT 许可的读取器测试用的文档快照（`packages/common/reader/__tests__/__fixtures__/test-doc.snapshot.bin`）：读出 4 条，里面的数据库块变成占位注释。
 
-这个手动对照留了一个忽略的测试 `interop_with_affine_files`：设 `TCMS_AFFINE_FIXTURE=<快照文件>` 读一个 AFFiNE 文档打印 Markdown，设 `TCMS_AFFINE_DUMP=<文件>` 把样例文档写成 Yjs 更新，`cargo test -p tcms-affine -- --ignored` 跑。当时还没对着真的 AFFiNE 服务跑过；A2 时对着 0.27.5-beta.3 的编辑器打开过 A1 写的文档，显示正常（7.2）。没加基准：A1 不在任何热路径上，基准在 A5。
+这个手动对照留了一个忽略的测试 `interop_with_affine_files`：设 `AFFINE_DOC_FIXTURE=<快照文件>` 读一个 AFFiNE 文档打印 Markdown，设 `AFFINE_DOC_DUMP=<文件>` 把样例文档写成 Yjs 更新，`cargo test -p affine-doc -- --ignored` 跑。当时还没对着真的 AFFiNE 服务跑过；A2 时对着 0.27.5-beta.3 的编辑器打开过 A1 写的文档，显示正常（7.2）。没加基准：A1 不在任何热路径上，基准在 A5。
 
 ### 7.2 A2 做了什么（2026-11-24）
 
-代码在新 crate `crates/tcms-affine-client`。它只认 AFFiNE 的协议，收发的是 Yjs 更新的字节，不用 TCMS 自己的类型（以后要整体搬进 AFFiNE 内核方案里的 `affine-sync-client`）。
+代码在新 crate `crates/tcms-affine-client`。它只认 AFFiNE 的协议，收发的是 Yjs 更新的字节，不用 TCMS 自己的类型，测试里也只用 `affine-doc`（以后要整体搬进 AFFiNE 内核方案里的 `affine-sync-client`）。
 
 - **连接**：TCP，`https` 时接 TLS（rustls 加 ring，Mozilla 的根证书，自托管用自己的 CA 时可以再给一个 PEM 文件）。HTTP 一次一个连接（hyper），WebSocket 用 tungstenite。不支持走 HTTP 代理。
 - **登录**：`POST /api/auth/sign-in` 用邮箱密码登录，拿网页版那种 cookie 会话（`affine_session`、`affine_user_id`，0.27.5-beta.3 的会话 15 天过期）。以后 HTTP 和 WebSocket 握手都带这个 cookie，还带 `x-affine-version`。7 天重新登录一次；服务端说没登录时马上重新登录再试一次。原生 App 用的那条路（换 JWT、`/api/auth/session/refresh`）没用：要装成原生客户端，对一个后台账号没好处。AFFiNE 对登录限流，连着登录失败（比如密码错）会被拒一阵子（`TOO_MANY_REQUEST`），这算“过一会儿再试”的错。
@@ -167,13 +167,13 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
   - 服务端推来的：别人改了加入了的文档（带改的人的用户 id；服务端可能把几段合成一段，还是普通的 Yjs 更新）；工作区里每有人推修改，所有加入了这个工作区的连接还都会收到一个“有文档变了”（带时间戳，包括没加入的、刚新建的文档），A3 用它发现人在 AFFiNE 里新建的文档。
   - 断线以后后台自己重连（1 秒起，每次翻倍，最多 30 秒），要的话重新登录，重新加入断之前加入了的文档，再告诉用的一方“又连上了”：断开的这段时间里的修改收不到广播，A3 要拿状态向量各取一次差量。断开的时候调用直接返回“断了”，不排队。
 - **协议版本 2**：服务端还有只在版本 2 能用的 `space:load-workspace-state`、`space:doc-lifecycle`（服务端自己记文档列表和回收站）。0.27.5-beta.3 的网页版没用（报的是 1），用版本 1 调它们会被拒，所以这里也不用。**文档列表和回收站照旧在工作区根文档的 `meta.pages` 里**：在网页版里把一篇文档移进回收站，根文档里那一项多了 `trash: true` 和 `trashDate`（2026-11-24 用无头浏览器试过）。
-- **文件夹**：不在 GraphQL 里，在工作区里一篇叫 `db$folders` 的 Yjs 文档里：根上每个以节点 id 为键的 Y.Map 是一行，字段 `id`、`parentId`、`data`（文件夹名或文档 id）、`type`（`folder`、`doc`、`tag`、`collection`）、`index`（排序键：fractional-indexing 的键加 `0` 再加 32 个随机字符），删掉的行带 `$$DELETED`。用同步协议取、推；读写这几张表和根文档 `meta.pages` 的代码由 AFFiNE 内核方案的 `affine-doc` 写（`docs/affine-kernel-rust.md`），这里不重复写。
+- **文件夹**：不在 GraphQL 里，在工作区里一篇叫 `db$folders` 的 Yjs 文档里：根上每个以节点 id 为键的 Y.Map 是一行，字段 `id`、`parentId`、`data`（文件夹名或文档 id）、`type`（`folder`、`doc`、`tag`、`collection`）、`index`（排序键：fractional-indexing 的键加 `0` 再加 32 个随机字符），删掉的行带 `$$DELETED`。用同步协议取、推；读写这几张表和根文档 `meta.pages` 的代码在 `affine-doc` 的 `workspace` 里（AFFiNE 内核方案的 K1，`docs/affine-kernel-rust.md`），这里不重复写。
 - **GraphQL**：工作区（列出、新建）、最近改过的文档（`recentlyUpdatedDocs`）、评论（列出、发、标成已解决、删、按游标看变化）。评论的内容是一小篇 BlockSuite 文档的快照，`comment_content` 把几段纯文字做成这个样子，`comment_text` 反过来取文字。
 
 测试：
 
 - `cargo test -p tcms-affine-client` 的单元测试对着本机起的一个假 AFFiNE（只会登录、`/info` 和几个 socket.io 事件）：握手、加入（不重复加入）、取（带状态向量、文档不存在）、推、时间戳、广播、回心跳、断掉以后重连并重新加入、密码不对、连不上。CI 里跑这些。
-- `tests/affine.rs` 对着真的 AFFiNE：新建工作区，推根文档和一篇用 `tcms-affine` 写的文档，读回来一样；另一条连接收到这条连接推的修改，改的人对；`doc_timestamps`；断开重连以后还收得到别人改的；拿状态向量取差量以后什么都不缺；GraphQL 的工作区、最近改过的文档、评论（发、列出、已解决、变化、删）；登录不上。要设 `AFFINE_TEST_URL`、`AFFINE_TEST_EMAIL`、`AFFINE_TEST_PASSWORD`，没设就跳过，CI 里没有 AFFiNE。2026-11-24 在开发机上对着 Docker 里的 `ghcr.io/toeverything/affine:0.27.5-beta.3`（加 `pgvector/pgvector:pg16`、`redis:7`，照 AFFiNE 的 `.docker/selfhost/compose.yml`）连跑 4 次都过。
+- `tests/affine.rs` 对着真的 AFFiNE：新建工作区，推根文档（文档列表用 `affine-doc` 的 `workspace` 写）和一篇用 `affine-doc` 写的文档，读回来一样；另一条连接收到这条连接推的修改，改的人对；`doc_timestamps`；断开重连以后还收得到别人改的；拿状态向量取差量以后什么都不缺；GraphQL 的工作区、最近改过的文档、评论（发、列出、已解决、变化、删）；登录不上。要设 `AFFINE_TEST_URL`、`AFFINE_TEST_EMAIL`、`AFFINE_TEST_PASSWORD`，没设就跳过，CI 里没有 AFFiNE。2026-11-24 在开发机上对着 Docker 里的 `ghcr.io/toeverything/affine:0.27.5-beta.3`（加 `pgvector/pgvector:pg16`、`redis:7`，照 AFFiNE 的 `.docker/selfhost/compose.yml`）连跑 4 次都过。
 - 另外手动用无头浏览器（Playwright）对照了 AFFiNE 网页版：Rust 写进去的文档在 AFFiNE 编辑器里打开，标题、二级标题、粗体、列表都对；在网页编辑器里打的字，Rust 这边收到广播、读成 Markdown 也对；连着的时候重启 AFFiNE 容器，4 秒后自己连回来。这些没写成自动测试（要浏览器和 AFFiNE）。
 
 没做的：网页版里评论要挂在文档里某段文字上才显示在那段旁边（文字上的 `comment-<id>` 属性），这是 A4 的事；没加基准，A2 不在热路径上，基准在 A5。

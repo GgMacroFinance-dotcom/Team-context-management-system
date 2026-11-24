@@ -1,6 +1,6 @@
 [package]
 name = "tcms-affine"
-description = "和 AFFiNE 同步：用 yrs 读写 AFFiNE 的文档结构，Markdown 子集和块互相转换"
+description = "和 AFFiNE 同步：本系统这一侧。文档结构的读写在 affine-doc 里"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,4 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-comrak.workspace = true
-getrandom.workspace = true
-regex.workspace = true
-similar.workspace = true
-thiserror.workspace = true
-yrs.workspace = true
+affine-doc.workspace = true

@@ -12,6 +12,7 @@ repository = "https://github.com/GgMacroFinance-dotcom/Team-context-management-s
 [workspace.dependencies]
 tcms-core = { path = "crates/tcms-core" }
 tcms-affine = { path = "crates/tcms-affine" }
+affine-doc = { path = "crates/affine-doc" }
 tcms-affine-client = { path = "crates/tcms-affine-client" }
 tcms-git = { path = "crates/tcms-git" }
 tcms-store = { path = "crates/tcms-store" }

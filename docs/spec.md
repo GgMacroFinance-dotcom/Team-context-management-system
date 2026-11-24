@@ -239,7 +239,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 - 同步走 Yjs 文档：本系统这一侧用 `yrs`（MIT）读写。CRDT 只用在这座桥上，真相还是 git（`architecture.md` 第 8 节）。
 - 人在 AFFiNE 里改，算人写的修改；agent 的提议在 AFFiNE 里显示成建议。
 - AFFiNE 和 BlockSuite 只参考设计，代码按本仓库的技术路线重写（维护者 2026-11-22 定）。
-- 用 Rust 写一个不带界面的 AFFiNE 文档内核（把 `tcms-affine` 里通用的部分拆出来）：方案草案见 [`affine-kernel-rust.md`](affine-kernel-rust.md)（2026-11-24，待定）。
+- 用 Rust 写一个不带界面的 AFFiNE 文档内核（把 `tcms-affine` 里通用的部分拆出来）：方案见 [`affine-kernel-rust.md`](affine-kernel-rust.md)（2026-11-24，维护者选了范围甲，分 K1 到 K5 做）。
 
 ## 9. 安全
 

@@ -27,6 +27,6 @@ tokio-tungstenite.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
-tcms-affine.workspace = true
+affine-doc.workspace = true
 yrs.workspace = true
 serde_json.workspace = true

@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "affine-doc"
+version = "0.1.0"
+dependencies = [
+ "comrak",
+ "getrandom 0.4.3",
+ "regex",
+ "similar",
+ "thiserror",
+ "yrs",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3719,18 +3731,14 @@ dependencies = [
 name = "tcms-affine"
 version = "0.1.0"
 dependencies = [
- "comrak",
- "getrandom 0.4.3",
- "regex",
- "similar",
- "thiserror",
- "yrs",
+ "affine-doc",
 ]
 
 [[package]]
 name = "tcms-affine-client"
 version = "0.1.0"
 dependencies = [
+ "affine-doc",
  "base64 0.22.1",
  "bytes",
  "futures-util",
@@ -3741,7 +3749,6 @@ dependencies = [
  "hyper-util",
  "rustls-pki-types",
  "serde_json",
- "tcms-affine",
  "thiserror",
  "tokio",
  "tokio-rustls",
