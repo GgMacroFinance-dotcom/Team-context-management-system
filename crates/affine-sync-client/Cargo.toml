@@ -1,6 +1,6 @@
 [package]
-name = "tcms-affine-client"
-description = "AFFiNE 的连接层：登录、socket.io 上的同步协议、GraphQL；不用 TCMS 自己的类型"
+name = "affine-sync-client"
+description = "AFFiNE 的连接层：登录、socket.io 上的同步协议、GraphQL；属于 AFFiNE 内核，不依赖 TCMS"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

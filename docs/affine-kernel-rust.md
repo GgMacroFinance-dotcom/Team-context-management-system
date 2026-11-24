@@ -73,7 +73,7 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 | TCMS 的步 | 状态 | 在内核里对应 |
 | --- | --- | --- |
 | A1：`yrs` 读写 AFFiNE 的文档结构，块 ↔ 条目，Markdown 子集 ↔ 块 | 已合并（#23），K1 第一个 PR 已搬进 `crates/affine-doc` | 内核的底子，再补全块的种类 |
-| A2：登录、socket.io、取文档、推更新、收广播、断线重连、GraphQL 的工作区和评论 | 另一个线程正在做，放在 `crates/tcms-affine-client`，不引用 TCMS 别的 crate | K3 就是它。**不重复写**：K3 只是把它挪进内核的 crate。根文档的文档列表、文件夹、文档属性 A2 不写，用 `affine-doc` 的 |
+| A2：登录、socket.io、取文档、推更新、收广播、断线重连、GraphQL 的工作区和评论 | 已合并（#26），K3 把 `crates/tcms-affine-client` 原样改名成 `crates/affine-sync-client` | K3 就是它。**不重复写**：K3 只是把它挪进内核的 crate。根文档的文档列表、文件夹、文档属性 A2 不写，用 `affine-doc` 的 |
 | A3 到 A5：同步循环、审核页、基准 | 没做 | 留在 TCMS，用内核的库 |
 
 为了不和 A2 撞车，建议：内核这边先做 K1、K2（只动文档模型和导入导出），等 A2 合并后再做 K3 的搬迁。A2 那边只需要注意一件事：连接层别引用 `tcms-core` 之类的 TCMS 类型，以后好搬。
@@ -106,6 +106,10 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 - `check_tree`：检查一棵树合不合 0.27.5 的规矩，会查出四种问题：不认得的块、版本号不对、放错了地方、该是文字的属性不是文字。打算在写完一篇文档、读回来以后跑一遍（`affine-sync.md` 5.3 第 5 条）。
 - 这一步只读，不写这些块。
 - 测试：新加 5 个。表格和数据库各造一个，编码成更新以后在另一个 Doc 里读。另外在本地拿 AFFiNE 仓库里 MIT 的三个测试快照（`packages/common/reader/__tests__/__fixtures__`）手动跑了一遍：两篇文档里有 14 种块，结构检查没有问题；根文档读出了工作区名字和文档列表。这样根文档的读法也和真 AFFiNE 对上了。这个对照用忽略的测试 `interop_with_affine_files` 跑，环境变量多了一个 `AFFINE_DOC_ROOT_FIXTURE`。`db$folders` 还没有真数据对照，等 A2。
+
+### 5.3 K3 做了什么（2026-11-24）
+
+A2（TCMS #26）合并以后，把 `crates/tcms-affine-client` 原样改名成 `crates/affine-sync-client`（`git mv`，代码不改，只改包名、引用和注释）。对着真 AFFiNE 的测试用的环境变量本来就是 `AFFINE_TEST_URL`、`AFFINE_TEST_EMAIL`、`AFFINE_TEST_PASSWORD`，不带 TCMS，不用改。A3 的同步循环照旧写在 `tcms-affine` 里，依赖改成 `affine-sync-client`。
 
 合计约 6 到 8 个 PR、5 到 7 周（两位工程师加 Claude；Claude 能写大部分代码，工程师主要读代码和对真 AFFiNE 验收）。
 
