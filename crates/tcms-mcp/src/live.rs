@@ -9,7 +9,10 @@
 //! 每次可能落在不同的线程上，glibc 每个线程一块内存区，换几次索引物理内存就涨一截（第 3 步量过：
 //! 1 万条换 7 次从约 80 MB 涨到约 240 MB）。后来 `tcms` 的分配器换成了 jemalloc（放掉的内存过十来秒还给系统，
 //! `docs/architecture.md` 第 10 节），这个线程照样留着。
+//!
+//! 也在这里攒着 agent 用到了哪些条目（[`Live::record_uses`]），跟着变更走的那个循环每次醒来时写进库（找晋升候选用）。
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -32,6 +35,8 @@ pub struct Live {
     rebuilding: Mutex<()>,
     /// 交给建索引的线程：每发一个，它取一次条目、建一份索引，从这里送回来。
     builder: mpsc::UnboundedSender<oneshot::Sender<Built>>,
+    /// 还没写进库的“用了几次”：（条目 id，岗位）→ 次数。
+    uses: std::sync::Mutex<HashMap<(String, String), i32>>,
 }
 
 impl Live {
@@ -43,7 +48,47 @@ impl Live {
             index: RwLock::new(Arc::new(index)),
             rebuilding: Mutex::new(()),
             builder,
+            uses: Default::default(),
         }))
+    }
+
+    /// 记下 `role` 的 agent 用到了这几条（`context_get` 按任务挑中放了全文、`context_read` 读了）。
+    /// 只在内存里加一下，[`Live::flush_uses`] 时写进库。
+    pub fn record_uses<'a>(&self, role: &str, ids: impl IntoIterator<Item = &'a str>) {
+        let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
+        for id in ids {
+            let n = uses.entry((id.to_owned(), role.to_owned())).or_default();
+            *n = n.saturating_add(1);
+        }
+    }
+
+    /// 把攒着的“用了几次”记到今天（UTC）上。写不进去时放回去，下次再写。返回写了几行。
+    pub async fn flush_uses(&self) -> Result<usize, Error> {
+        let taken = std::mem::take(&mut *self.uses.lock().unwrap_or_else(|e| e.into_inner()));
+        if taken.is_empty() {
+            return Ok(0);
+        }
+        let rows: Vec<(String, String, i32)> = taken
+            .into_iter()
+            .map(|((id, role), n)| (id, role, n))
+            .collect();
+        match self.store.add_uses(&tcms_core::utc_today(), &rows).await {
+            Ok(()) => Ok(rows.len()),
+            Err(e) => {
+                let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
+                for (id, role, n) in rows {
+                    let m = uses.entry((id, role)).or_default();
+                    *m = m.saturating_add(n);
+                }
+                Err(e.into())
+            }
+        }
+    }
+
+    async fn flush_uses_logged(&self) {
+        if let Err(e) = self.flush_uses().await {
+            eprintln!("记条目用了几次失败，下次再写：{e}");
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -100,6 +145,7 @@ impl Live {
                 };
                 // 订阅之前漏掉的变更，在这里补上。
                 live.refresh_logged().await;
+                live.flush_uses_logged().await;
                 let mut tick = tokio::time::interval(POLL);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 tick.tick().await;
@@ -119,6 +165,7 @@ impl Live {
                         }
                     }
                     live.refresh_logged().await;
+                    live.flush_uses_logged().await;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }

@@ -362,23 +362,59 @@ pub async fn suggest_promotions(repo: &ContextRepo, store: &Store, json: bool) -
         None => None,
     };
     let found = tcms_write::promotion_candidates(corpus, teams.as_ref());
+    let recent = store
+        .recent_uses(&tcms_core::utc_today(), tcms_write::USE_WINDOW_DAYS as i32)
+        .await?;
+    let grouped: std::collections::HashSet<&str> = found
+        .iter()
+        .flat_map(|c| c.items.iter().map(|it| it.id.as_str()))
+        .collect();
+    let used = tcms_write::used_candidates(corpus, teams.as_ref(), &recent, &grouped);
     if json {
-        println!("{}", serde_json::to_string_pretty(&found)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "similar": found, "used": used }))?
+        );
         return Ok(());
     }
-    if found.is_empty() {
+    if found.is_empty() && used.is_empty() {
         println!("现在没有可以晋升的条目。");
         return Ok(());
     }
-    println!("{} 组可以晋升的条目（几个范围都写了相近的）：", found.len());
-    for c in &found {
-        println!();
-        println!("建议提到 {}（{}）：", c.to, c.kind);
-        for it in &c.items {
-            println!("  {}  {}  {}", it.id, it.scope, it.title);
+    if !found.is_empty() {
+        println!("{} 组可以晋升的条目（几个范围都写了相近的）：", found.len());
+        for c in &found {
+            println!();
+            println!("建议提到 {}（{}）：", c.to, c.kind);
+            for it in &c.items {
+                println!("  {}  {}  {}", it.id, it.scope, it.title);
+            }
         }
+        println!();
     }
-    println!();
-    println!("挑写得最好的一条：tcms promote <id> --to <范围> --reason \"...\"，批准以后才生效。");
+    if !used.is_empty() {
+        println!(
+            "{} 条用得多的（最近 {} 天用了至少 {} 次、在至少 {} 天里用过）：",
+            used.len(),
+            tcms_write::USE_WINDOW_DAYS,
+            tcms_write::MIN_USES,
+            tcms_write::MIN_USE_DAYS
+        );
+        println!();
+        for c in &used {
+            println!(
+                "  {}  {}  {}  用了 {} 次（{} 天，岗位 {}），建议提到 {}",
+                c.item.id,
+                c.item.scope,
+                c.item.title,
+                c.uses,
+                c.days,
+                c.roles.join("、"),
+                c.to
+            );
+        }
+        println!();
+    }
+    println!("挑一条：tcms promote <id> --to <范围> --reason \"...\"，批准以后才生效。");
     Ok(())
 }

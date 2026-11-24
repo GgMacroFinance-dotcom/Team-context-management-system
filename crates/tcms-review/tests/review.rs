@@ -1137,6 +1137,95 @@ async fn promote_from_item_page() {
     f.store.drop_schema().await.unwrap();
 }
 
+/// 用得多的条目：最近 30 天用得够多、够多天的岗位条目列出来，建议提到它的团队；全公司的、用得少的不列；
+/// 已经是相近的那几组里的不重复列；提了以后标成在等审核。
+#[tokio::test]
+async fn heavily_used_on_promotions_page() {
+    let Some(f) = fixture().await else { return };
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["used"], json!([]), "{v}");
+    assert_eq!(
+        (&v["use_window_days"], &v["min_uses"], &v["min_use_days"]),
+        (&json!(30), &json!(20), &json!(5))
+    );
+    // MACRO 最近 5 天每天用 5 次；LATER 用得少；RULE 在全公司；40 天以前的不算。
+    for d in 0..5 {
+        let day = tcms_core::utc_days_ago(d);
+        f.store
+            .add_uses(
+                &day,
+                &[
+                    (MACRO.to_owned(), "macro".to_owned(), 5),
+                    (LATER.to_owned(), "macro".to_owned(), 1),
+                    (RULE.to_owned(), "macro".to_owned(), 30),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    f.store
+        .add_uses(
+            &tcms_core::utc_days_ago(40),
+            &[(LATER.to_owned(), "macro".to_owned(), 100)],
+        )
+        .await
+        .unwrap();
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["used_total"], 1, "{v}");
+    let u = &v["used"][0];
+    assert_eq!(u["item"]["id"], MACRO, "{v}");
+    assert_eq!(
+        (&u["to"], &u["kind"], &u["uses"], &u["days"], &u["roles"]),
+        (
+            &json!("team:research"),
+            &json!("fact"),
+            &json!(25),
+            &json!(5),
+            &json!(["macro"])
+        )
+    );
+    assert!(u["item"]["pending"].is_null());
+
+    // 提了以后标成在等审核。
+    let r = post(
+        &f,
+        &format!("/api/items/{MACRO}/promote"),
+        json!({"to": "team:research", "reason": "用得多"}),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let proposal = r.json()["proposal_id"].as_str().unwrap().to_owned();
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["used"][0]["item"]["pending"], proposal.as_str(), "{v}");
+
+    // 别的岗位也写了相近的、进了相近的那几组以后，这里不再重复列。
+    f.repo
+        .commit(
+            &[
+                put("teams.yaml", "teams:\n  research:\n    roles: [macro, data]\n"),
+                put(
+                    "role-data/来源.md",
+                    "## 宏观数据该从哪里取\n<!-- ctx id=ctx_01JDX4M6Q8FFFFFFFFFFFFFFFF kind=fact -->\n统计局。\n",
+                ),
+            ],
+            "数据岗位",
+            &Author::default(),
+        )
+        .unwrap();
+    tcms_index::reindex(&f.repo, &f.store, false).await.unwrap();
+    assert!(f.live.refresh().await.unwrap().is_some());
+    let v = get(&f, "/api/promotions").await;
+    assert_eq!(v["total"], 1, "{v}");
+    assert_eq!(v["used_total"], 0, "{v}");
+
+    f.store.drop_schema().await.unwrap();
+}
+
 /// 系统找的晋升候选：两个岗位都写了相近的条目，建议提到它们的团队；挑一条提了以后标成在等审核；
 /// 批准以后团队里有了相近的，不再列。
 #[tokio::test]

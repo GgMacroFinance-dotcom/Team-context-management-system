@@ -4,7 +4,8 @@
 //! - [`accept`]、[`reject`]：人批准或拒绝。批准时排队（一个 schema 同一时间只处理一条），先把索引带到 HEAD，
 //!   条目在提议之后被人改过就停下来要人看过，再改文件、提交、索引。
 //! - [`promote`]：晋升，把一条岗位、团队、项目的条目提到更大的范围（一条换了范围的取代提议）。
-//! - [`promotion_candidates`]：系统找晋升候选，几个岗位（或团队、项目）都写了的相近条目，建议提到哪里。
+//! - [`promotion_candidates`]：系统找晋升候选，几个岗位（或团队、项目）都写了的相近条目，建议提到哪里；
+//!   [`used_candidates`]：最近用得多的岗位、团队、项目条目。
 //! - [`proposal_diff`]：给审核的人看批准以后差在哪里。
 //! - [`edit_item`]：人在审核页里改单条的纯文本，和批准排在同一个提交队列里。
 //! - [`sync`]：和上下文仓库的远端同步（拉、索引、推）。批准和改单条配了远端时也会先拉、后推。
@@ -22,7 +23,10 @@ mod review;
 mod sync;
 
 pub use accept::{AcceptOptions, Accepted, WriteError, accept, default_path, reject};
-pub use candidates::{CandidateItem, PromotionCandidate, promotion_candidates};
+pub use candidates::{
+    CandidateItem, MIN_USE_DAYS, MIN_USES, PromotionCandidate, USE_WINDOW_DAYS, UsedCandidate,
+    promotion_candidates, used_candidates,
+};
 pub use conflicts::{Conflict, find_conflicts};
 pub use edit_item::{Committer, Edited, ItemEdit, edit_item};
 pub use ids::{AssignedId, IdsAssigned, assign_all, assign_since};

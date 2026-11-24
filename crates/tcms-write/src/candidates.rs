@@ -5,14 +5,25 @@
 //! 相近的算法和找矛盾一样（`conflicts`）。两两比太慢（1 万条约 5 千万对），先按标题的词和标签建倒排，
 //! 只比至少有一个词或标签相同的。相近的连成一组（并查集）。要提到的范围里已经有相近的条目时不再建议。
 //! 确定性的：同样的条目，结果一样。
+//!
+//! 另一种候选是用得多的（[`used_candidates`]）：岗位、团队、项目里的一条，最近 [`USE_WINDOW_DAYS`] 天被 agent
+//! 用了很多次（`context_get` 按任务挑中、`context_read` 读了，记在 `item_uses` 表里），建议人看看要不要提上去。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::Serialize;
 use tcms_core::{Scope, Teams};
 use tcms_search::Corpus;
+use tcms_store::ItemUse;
 
-use crate::conflicts::{score, similar, tag_set, terms};
+use crate::conflicts::{find_conflicts, score, similar, tag_set, terms};
+
+/// 用得多的看最近几天。
+pub const USE_WINDOW_DAYS: i64 = 30;
+/// 用得多：最近 [`USE_WINDOW_DAYS`] 天里至少用了这么多次……
+pub const MIN_USES: i64 = 20;
+/// ……并且在至少这么多天里用过（一天里集中用很多次的不算）。
+pub const MIN_USE_DAYS: i64 = 5;
 
 /// 一组建议提到更大范围的条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,6 +197,63 @@ pub fn promotion_candidates(corpus: &Corpus, teams: Option<&Teams>) -> Vec<Promo
     out.into_iter().map(|(_, c)| c).collect()
 }
 
+/// 一条用得多、建议提到更大范围的条目。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UsedCandidate {
+    /// 建议提到哪个范围：岗位在 `teams.yaml` 的团队里时是 `team:<团队>`，别的是 `org`。
+    pub to: String,
+    pub kind: String,
+    pub item: CandidateItem,
+    /// 最近 [`USE_WINDOW_DAYS`] 天用了几次、在几天里用过、哪些岗位用过。
+    pub uses: i64,
+    pub days: i64,
+    pub roles: Vec<String>,
+}
+
+/// 用得多的晋升候选，用得多的在前。`uses` 是最近 [`USE_WINDOW_DAYS`] 天每条用了多少次
+/// （`Store::recent_uses`），`skip` 里的（已经在 [`promotion_candidates`] 的组里的）不再列。
+/// 全公司的、已经不是生效的、要提到的范围里已经有相近条目的不列。
+pub fn used_candidates(
+    corpus: &Corpus,
+    teams: Option<&Teams>,
+    uses: &[ItemUse],
+    skip: &HashSet<&str>,
+) -> Vec<UsedCandidate> {
+    let mut out: Vec<UsedCandidate> = uses
+        .iter()
+        .filter(|u| u.uses >= MIN_USES && u.days >= MIN_USE_DAYS)
+        .filter(|u| !skip.contains(u.item_id.as_str()))
+        .filter_map(|u| {
+            let it = corpus.get(&u.item_id)?;
+            level(&it.scope)?;
+            let to = target(&BTreeSet::from([&it.scope]), teams);
+            if !find_conflicts(corpus, &to, it.kind, &it.title, &it.tags, Some(&it.id)).is_empty() {
+                return None;
+            }
+            Some(UsedCandidate {
+                to: to.to_string(),
+                kind: it.kind.to_string(),
+                item: CandidateItem {
+                    id: it.id.clone(),
+                    scope: it.scope.to_string(),
+                    title: it.title.clone(),
+                    revision: it.revision,
+                },
+                uses: u.uses,
+                days: u.days,
+                roles: u.roles.clone(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.uses
+            .cmp(&a.uses)
+            .then_with(|| b.days.cmp(&a.days))
+            .then_with(|| a.item.id.cmp(&b.item.id))
+    });
+    out
+}
+
 /// 几个岗位都在 `teams.yaml` 的同一个团队里时提到那个团队，别的都提到全公司。
 fn target(scopes: &BTreeSet<&Scope>, teams: Option<&Teams>) -> Scope {
     let mut team = None;
@@ -333,6 +401,70 @@ mod tests {
             promotion_candidates(&corpus, Some(&teams)),
             promotion_candidates(&corpus, Some(&teams))
         );
+    }
+
+    #[test]
+    fn heavily_used_items() {
+        let teams = Teams::parse("teams:\n  research:\n    roles: [macro, data]\n").unwrap();
+        let corpus = Corpus::new(
+            vec![
+                item("ctx_u1", "role:macro", Kind::Fact, "CPI 数据从哪里取", &[]),
+                item("ctx_u2", "role:intern", Kind::Fact, "实习生手册", &[]),
+                item(
+                    "ctx_u3",
+                    "team:research",
+                    Kind::Procedure,
+                    "周报怎么排版",
+                    &[],
+                ),
+                item("ctx_u4", "org", Kind::Fact, "公司地址", &[]),
+                item("ctx_u5", "role:macro", Kind::Fact, "PPI 的口径", &[]),
+                item("ctx_u6", "team:research", Kind::Fact, "PPI 口径", &[]),
+                item("ctx_u7", "role:macro", Kind::Memory, "很少用的", &[]),
+                item(
+                    "ctx_u8",
+                    "role:macro",
+                    Kind::Memory,
+                    "一天里用了很多次",
+                    &[],
+                ),
+            ],
+            1,
+            None,
+        );
+        let used = |id: &str, uses: i64, days: i64| ItemUse {
+            item_id: id.into(),
+            uses,
+            days,
+            roles: vec!["macro".into()],
+        };
+        let uses = vec![
+            used("ctx_u1", 40, 10),
+            used("ctx_u2", 25, 6),
+            used("ctx_u3", 30, 12),
+            // 全公司的、要提到的范围里已经有相近的、用得少的、只在一两天里用的、已经不在的：不列。
+            used("ctx_u4", 99, 30),
+            used("ctx_u5", 50, 20),
+            used("ctx_u7", 5, 5),
+            used("ctx_u8", 60, 2),
+            used("ctx_gone", 80, 20),
+        ];
+        let c = used_candidates(&corpus, Some(&teams), &uses, &HashSet::new());
+        let got: Vec<(&str, &str, i64)> = c
+            .iter()
+            .map(|c| (c.item.id.as_str(), c.to.as_str(), c.uses))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("ctx_u1", "team:research", 40),
+                ("ctx_u3", "org", 30),
+                ("ctx_u2", "org", 25)
+            ]
+        );
+        // 已经在相近的那几组里的不再列。
+        let c = used_candidates(&corpus, Some(&teams), &uses, &HashSet::from(["ctx_u1"]));
+        assert_eq!(c[0].item.id, "ctx_u3");
     }
 
     #[test]

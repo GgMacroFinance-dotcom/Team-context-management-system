@@ -443,6 +443,58 @@ async fn read_old_revision_after_scope_moves() {
     f.store.drop_schema().await.unwrap();
 }
 
+/// 用到了哪些条目：context_get 按任务挑中放了全文的、context_read 读了的各记一次；固定前缀里的、
+/// 只列了标题的、看不到的不记。攒在内存里，写进库以后按岗位合计。
+#[tokio::test]
+async fn records_item_uses() {
+    let Some(f) = fixture().await else { return };
+    let client = connect_stream(&f.live, &f.macro_token).await;
+    for _ in 0..2 {
+        let r = call(
+            &client,
+            "context_get",
+            json!({"role": "macro", "task": "宏观数据从哪里取，CPI 怎么注明"}),
+        )
+        .await;
+        let v = ok(&r);
+        let task: Vec<&str> = v["included"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["section"] == "task")
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert!(task.contains(&MACRO), "{v}");
+    }
+    let r = call(&client, "context_read", json!({"id": WEEKLY})).await;
+    ok(&r);
+    // 看不到的、不存在的不记。
+    let r = call(&client, "context_read", json!({"id": DATA})).await;
+    err_text(&r);
+    let r = call(&client, "context_read", json!({"id": NOWHERE})).await;
+    err_text(&r);
+    // 还在内存里，库里没有。
+    let today = tcms_core::utc_today();
+    assert!(f.store.recent_uses(&today, 30).await.unwrap().is_empty());
+    assert!(f.live.flush_uses().await.unwrap() >= 2);
+    assert_eq!(f.live.flush_uses().await.unwrap(), 0);
+    let uses = f.store.recent_uses(&today, 30).await.unwrap();
+    let get = |id: &str| uses.iter().find(|u| u.item_id == id);
+    let m = get(MACRO).expect("MACRO 记了");
+    assert_eq!(
+        (m.uses, m.days, m.roles.clone()),
+        (2, 1, vec!["macro".to_owned()])
+    );
+    assert_eq!(get(WEEKLY).map(|u| u.uses), Some(1));
+    // 固定前缀里的规则每次都在，不算；看不到的、不存在的不算。
+    assert!(
+        get(RULE).is_none() && get(DATA).is_none() && get(NOWHERE).is_none(),
+        "{uses:?}"
+    );
+    client.cancel().await.unwrap();
+    f.store.drop_schema().await.unwrap();
+}
+
 /// agent 提议 → 批准以前不生效 → 人批准、写进 git → 服务换上新索引以后 agent 看得到。
 #[tokio::test]
 async fn propose_then_accept() {

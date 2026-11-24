@@ -118,6 +118,8 @@ Accepted-by: <审核的人>
 
 **系统找晋升候选**（`crates/tcms-write/src/candidates.rs`，2026-11-24）：在内存里那份条目（`Corpus`）上算，不查数据库。岗位和岗位比，团队、项目和团队、项目比；同一类型，相近的算法和找相近的条目一样（`conflicts.rs` 的 `score`：标题共有的词数 / 词少的那边的词数，和标签的交集 / 并集，取大的，到 50 算相近）。两两比 1 万条要比约 5 千万对，所以先按（类型，标题的词或标签）建倒排，对每一条只走它的词和标签的倒排，边走边数和别的条目共有几个词、几个标签，只算至少有一个相同的。相近的用并查集连成一组，至少跨两个范围才算。要提到的范围：都是岗位、又都在 `teams.yaml` 的同一个团队里时是那个团队，别的都是全公司；那个范围里已经有和组里某一条相近的条目时不建议。结果按跨几个范围、几条排，同样的条目结果一样。审核页每次打开“可以晋升的”算一次（1 万条约 55 到 65 毫秒，第 10 节），不缓存。
 
+**用得多的晋升候选**（同一个文件的 `used_candidates`，2026-11-24）：`context_get` 按任务挑中、放了全文的条目（固定前缀里的不算），和 `context_read` 读的条目，按（条目 id，岗位）在服务内存里加一（`Live::record_uses`，一个互斥锁里改一个 `HashMap`）。跟着变更的那个循环每次醒来（收到变更通知或者每 30 秒）把攒着的写进 `item_uses`（`Store::add_uses`：一条 `INSERT ... SELECT FROM unnest` 按今天加上去，同一个事务里删掉 90 天以前的），`tcms serve` 退出时再写一次；写不进去时放回内存，下次再写。服务被强行杀掉时丢最多约 30 秒的计数，只影响建议。找候选时按最近 30 天汇总（`Store::recent_uses`：次数、几天、哪些岗位），用了 20 次以上、在 5 天以上用过的，去掉全公司的、已经不生效的、已经在相近的组里的，要提到的范围用同一个 `target` 算，那里已经有相近的条目（`find_conflicts`）时不列。用得多的在前。
+
 **人在审核页改单条**（`crates/tcms-write/src/edit_item.rs`）：和批准排同一个队（同一把进程锁和 advisory lock），索引带到 HEAD，条目要还是生效的、版本号要和打开页面时一样，然后像批准“修改”一样只替换那一条的文字（元数据里没改的字段原样保留，比如 `owner`），提交，增量索引，记审计 `item.edit`。提交信息：
 
 ```text
@@ -151,7 +153,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 **取一份条目**：在一个只读的可重复读事务里，从 PostgreSQL 取出全部 `active` 条目、当时最大的 `changes` 序号和索引到的提交，三样对得上（`Store::snapshot`）。在这份条目上建 tantivy 索引（第 6 节）。`tcms get` 每次现取现建。
 
-**服务里的那一份**（`crates/tcms-mcp/src/live.rs`）：`tcms serve` 常驻一份条目和检索索引。收到 `NOTIFY tcms_changes`、或者每 30 秒，查一次最大的变更序号，和手上这份不一样就整份重取重建，建好再换上；换的时候请求继续用旧的，不等。通知断了会重新订阅，断线期间漏的由定时检查补上。MCP 那边不写条目；条目的变化经过 `tcms reindex`、批准提议或在审核页改单条，这几条路写完都更新 PostgreSQL 里的索引并发通知，服务照上面的办法换上。
+**服务里的那一份**（`crates/tcms-mcp/src/live.rs`）：`tcms serve` 常驻一份条目和检索索引。收到 `NOTIFY tcms_changes`、或者每 30 秒，查一次最大的变更序号，和手上这份不一样就整份重取重建，建好再换上；换的时候请求继续用旧的，不等。通知断了会重新订阅，断线期间漏的由定时检查补上。MCP 那边不写条目；条目的变化经过 `tcms reindex`、批准提议或在审核页改单条，这几条路写完都更新 PostgreSQL 里的索引并发通知，服务照上面的办法换上。同一个循环每次醒来也把 agent 用到了哪些条目写进 `item_uses`（第 3 节“用得多的晋升候选”）。
 
 取条目和建索引放在一个专门的线程里（自己的单线程 tokio 运行时、自己的一个数据库连接），tantivy 也在这个线程里直接写成一个段，不起它的后台线程。这样每一份条目和索引的内存都从同一处分配，放掉以后下一次重建接着用。一开始放在 tokio 的工作线程和 tantivy 自己的线程里，glibc 每个线程一块内存区，1 万条换 5 次索引物理内存从约 80 MB 涨到约 220 MB，换 7 次约 240 MB，还在涨；改了以后换 5 次约 85 到 96 MB，稳住了（第 10 节）。
 
@@ -181,7 +183,7 @@ Edited-by: 王审核（tok_01JDX4...）
   | `proposals` | 提议 id（`prop_` 加 ULID）、动作、目标条目和当时的版本号、范围、类型、标题、正文、标签、复核日期、理由、证据、找到的矛盾（JSON）、内容哈希（`open` 的唯一）、抹了几处、提议的令牌和名字和岗位、状态（`open`、`accepted`、`rejected`）、提的时间、处理的时间和人和备注、写成的条目和提交 |
   | `changes` | 全局递增序号、条目 id、范围、版本号、提交、时间 |
   | `tokens` | 令牌 id（`tok_` 加 ULID）、种类（`agent` 或 `reviewer`）、名字、令牌的 SHA-256、岗位（只有 `agent` 有，约束保证）、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。两种令牌互不通用：核对 MCP 的令牌只认 `agent`，审核页只认 `reviewer` |
-  | `usage` | 每条被放进上下文包、被 `read` 的次数，按岗位记 |
+  | `item_uses` | 条目被 agent 用了几次：条目 id、日期（UTC）、岗位、次数，一天一个岗位一行（2026-11-24，迁移 `0006_item_uses.sql`）。找用得多的晋升候选用（第 3 节），只留 90 天 |
   | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝，第 5 步加人在审核页改单条（`item.edit`） |
 
 - **行级安全**（2026-11-24 做了，迁移 `0005_row_security.sql`）：agent 经 MCP 查数据库的读（`context_read` 读现在这一版和旧版本，`context_changes` 查变更）都在一个只读、可重复读的事务里，开头用 `set_config(..., true)` 写上令牌能看的范围：`tcms.scopes` 是数组写法（比如 `{org,team:research,role:macro,project:q4}`），`tcms.all_projects` 是 `on` 或 `off`（令牌的项目是 `*` 时为 `on`）。只在这个事务里有效，连接放回池子以后不带到下一次。`items`、`item_versions`（按快照里那个版本当时的范围）、`changes` 上各有一条策略 `reach`，调函数 `visible_scope(scope)`：写了 `tcms.scopes` 就只放行这些范围（空数组什么都看不到），没写就不拦。没写的是服务自己的读写：建索引、取条目建检索索引、审核页、命令行，这些要看全部。
@@ -217,7 +219,7 @@ Edited-by: 王审核（tok_01JDX4...）
   - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
 - 审核页（`crates/tcms-review`，第 5 步）：和 `/mcp` 在同一个 axum 服务里（`--stdio` 时没有）。
   - `/review` 是一个静态页面，`app.js`、`app.css` 编进二进制（`include_str!`），不用构建前端，不加载外部资源；`/` 跳到 `/review`。
-  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`items/{id}/promote`（晋升，做成一条提议）、`promotions`（系统找的晋升候选，最多 50 组，组里哪一条已经有晋升提议在等审核时带上提议 id）、`remote`（和远端同步的情况，下面）。`items/{id}` 带上 `promote_to`（这一条能提到哪些范围），`proposals/{id}` 带上 `promotion`（换了范围的取代：从哪里到哪里）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
+  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`items/{id}/promote`（晋升，做成一条提议）、`promotions`（系统找的晋升候选：`candidates` 是相近的，最多 50 组；`used` 是用得多的，最多 50 条，带 `uses`、`days`、`roles`；哪一条已经有晋升提议在等审核时带上提议 id；还带 `use_window_days`、`min_uses`、`min_use_days` 这几个门槛）、`remote`（和远端同步的情况，下面）。`items/{id}` 带上 `promote_to`（这一条能提到哪些范围），`proposals/{id}` 带上 `promotion`（换了范围的取代：从哪里到哪里）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
   - 令牌存在浏览器的 sessionStorage 里（关掉标签页就没了），每次请求放在请求头里，不用 cookie，所以没有跨站请求伪造的问题。页面只用 `textContent` 和建元素写内容，不拼 HTML。
   - 响应头：`Content-Security-Policy`（`default-src 'none'`，脚本、样式、请求只许同源，`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。和 `/mcp` 一样只接受 `Host` 是本机或 `--allowed-host` 写了的请求。
   - 出错时回 `{"error": 一句话, "code": ..., "current": 现在的版本号（版本落后时）}`：没找到 404，不是待审核、版本落后、目标没了、仓库正忙（HEAD 变了或工作区不干净）409，参数不对 400。
@@ -303,6 +305,8 @@ Edited-by: 王审核（tok_01JDX4...）
 加行级安全时（2026-11-24）用普通账号和超级用户各跑了一遍 `bench index`、`bench read`、`bench serve`，别的几项差别都在每次跑的波动以内（比如从头重建 1 万条 266 和 299 毫秒、取出 1 万条 75 和 69 毫秒）。CI 里的账号是超级用户，量不到行级安全的开销。
 
 审核页（第 5 步）没有加新的基准：它的接口是人点一下调一次，不在热路径上；接受、改单条和 `tcms accept` 走同一个提交队列，批准的耗时已经在 `bench serve` 里量了。
+
+记下条目用了几次（2026-11-24）没有加新的基准：`context_get`、`context_read` 每次只多一次内存里的加一，写库在后台的循环里；`bench serve` 的往返已经含了它，加了以后量（普通账号）`context_get` 中位数 7.7 毫秒、p95 9.4 毫秒，`context_read` 中位数 0.8 毫秒、p95 1.0 毫秒，和以前差不多。找用得多的候选只多一次按 30 天汇总的查询，是人打开审核页时查的，不在热路径上。
 
 “空闲时内存 < 50 MB”是给第 3 步的常驻服务定的。2026-11-23 把 `tcms` 的内存分配器换成 jemalloc（开后台线程）以后达到了：1 万条换过 5 次索引、空闲 20 秒以后约 40 到 41 MB。其中约 15 到 16 MB 是程序和库映射进来的代码，条目和检索索引真正在用的约 12 MB（条目的结构体约 2 MB、字符串约 7 MB，tantivy 索引约 3 MB），剩下的约 12 MB 没再细分（运行时、数据库连接等）。
 

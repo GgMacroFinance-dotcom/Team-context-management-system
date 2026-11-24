@@ -584,11 +584,40 @@
             hint: `批准以后在 ${c.to} 里写一条一样的，取代挑的那一条；另外几条留在原来的范围里，要收掉的话直接改上下文仓库里的 Markdown。`,
           }));
     });
+    // 用得多的：一条一块，和上面一样挑了就做成晋升提议。
+    const used = data.used.map((c, n) => {
+      const it = c.item;
+      const suffix = `-u${n}`;
+      const roles = c.roles.join("、");
+      return h("section", { class: "candidate" },
+        h("h2", {}, `${it.scope} 里用得多，建议提到${scopeWord(c.to)}`),
+        h("div", { class: "panel" }, h("ul", { class: "list" }, h("li", {},
+          h("a", { class: "row", href: `#/items/${enc(it.id)}` },
+            h("div", { class: "title" }, it.title),
+            h("div", { class: "meta" },
+              h("span", {}, `${it.scope} · ${kindWord(c.kind)}`),
+              h("span", {}, `第 ${it.revision} 版`),
+              h("span", {}, `${data.use_window_days} 天里用了 ${c.uses} 次（${c.days} 天），岗位 ${roles}`),
+              it.pending ? badge("晋升提议在等审核", "open") : null))))),
+        it.pending
+          ? h("p", { class: "muted small" }, "已经有一条晋升提议在等审核：",
+            h("a", { href: `#/proposals/${enc(it.pending)}` }, it.pending))
+          : promoteForm({
+            items: [it], targets: [c.to], suffix,
+            reason: `过去 ${data.use_window_days} 天 ${roles} 用了 ${c.uses} 次，提到 ${c.to} 以后那里的岗位都能用上。`,
+            hint: `批准以后在 ${c.to} 里写一条一样的，取代 ${it.scope} 里的这一条。只是用得多，别的岗位用不用得上要你判断。`,
+          }));
+    });
+    const empty = h("div", { class: "panel" }, h("div", { class: "empty" }, "现在没有可以晋升的条目。"));
     render(
       h("h1", {}, "可以晋升的条目"),
       h("p", { class: "muted small" },
         `系统找出几个岗位（或团队、项目）都写了的相近条目：同一类型，标题的词重合一半以上或标签相近。几个岗位在同一个团队里时建议提到团队，不然提到全公司；要提到的范围里已经有相近的就不再列。共 ${data.total} 组${data.total > data.limit ? `，只列前 ${data.limit} 组` : ""}${data.commit ? `；索引到提交 ${short(data.commit)}` : ""}。`),
-      ...(cards.length ? cards : [h("div", { class: "panel" }, h("div", { class: "empty" }, "现在没有可以晋升的条目。"))]));
+      ...(cards.length ? cards : [used.length ? h("p", { class: "muted" }, "现在没有几个范围都写了的相近条目。") : empty]),
+      used.length ? h("h1", { class: "section" }, "用得多的条目") : null,
+      used.length ? h("p", { class: "muted small" },
+        `岗位、团队、项目里的条目，最近 ${data.use_window_days} 天被 agent 用了至少 ${data.min_uses} 次、在至少 ${data.min_use_days} 天里用过（按任务挑中放了全文、或者读了全文都算一次）。共 ${data.used_total} 条${data.used_total > data.limit ? `，只列前 ${data.limit} 条` : ""}。`) : null,
+      ...used);
   }
 
   // 改单条的纯文本：标题、标签、复核日期、正文。类型、范围不在这里改。

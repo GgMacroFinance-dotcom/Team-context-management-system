@@ -29,6 +29,7 @@ macro_rules! select_row {
 
 mod proposals;
 mod tokens;
+mod uses;
 
 pub use sqlx::postgres::PgListener;
 
@@ -37,6 +38,7 @@ pub use tokens::{
     ALL_PROJECTS, Identity, ItemRead, NewToken, Reviewer, TOKEN_PREFIX, TokenRow, VisibleChange,
     VisibleChanges, hash_token,
 };
+pub use uses::{ItemUse, KEEP_DAYS};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

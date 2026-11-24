@@ -1,5 +1,7 @@
 //! 审核页用的 JSON 接口。出错时回 `{"error": "一句话", "code": "...", "current": 版本号?}`。
 
+use std::collections::HashSet;
+
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
@@ -12,8 +14,9 @@ use tcms_git::{Author, ContextRepo};
 use tcms_search::{SearchOptions, Visibility};
 use tcms_store::{Identity, ItemRow, ProposalRow, Reviewer};
 use tcms_write::{
-    AcceptOptions, Conflict, ItemEdit, ProposeError, default_path, promotion_candidates,
-    promotion_targets, proposal_diff, read_teams,
+    AcceptOptions, Conflict, ItemEdit, MIN_USE_DAYS, MIN_USES, ProposeError, USE_WINDOW_DAYS,
+    default_path, promotion_candidates, promotion_targets, proposal_diff, read_teams,
+    used_candidates,
 };
 
 use crate::AppState;
@@ -482,6 +485,32 @@ pub(crate) async fn promotions(State(state): State<AppState>) -> ApiResult {
             })
             .map(|p| p.id.clone())
     };
+    // 用得多的：已经在上面几组里的不再列。
+    let recent = state
+        .live
+        .store()
+        .recent_uses(&utc_today(), USE_WINDOW_DAYS as i32)
+        .await
+        .map_err(store_error)?;
+    let grouped: HashSet<&str> = all
+        .iter()
+        .flat_map(|c| c.items.iter().map(|it| it.id.as_str()))
+        .collect();
+    let used_all = used_candidates(corpus, teams.as_ref(), &recent, &grouped);
+    let used: Vec<Value> = used_all
+        .iter()
+        .take(MAX_CANDIDATES)
+        .map(|c| {
+            let it = &c.item;
+            json!({
+                "to": c.to, "kind": c.kind, "uses": c.uses, "days": c.days, "roles": c.roles,
+                "item": {
+                    "id": it.id, "scope": it.scope, "title": it.title, "revision": it.revision,
+                    "pending": pending(&it.id, &it.scope),
+                },
+            })
+        })
+        .collect();
     let candidates: Vec<Value> = all
         .iter()
         .take(MAX_CANDIDATES)
@@ -504,6 +533,11 @@ pub(crate) async fn promotions(State(state): State<AppState>) -> ApiResult {
         "limit": MAX_CANDIDATES,
         "commit": corpus.commit,
         "candidates": candidates,
+        "used_total": used_all.len(),
+        "used": used,
+        "use_window_days": USE_WINDOW_DAYS,
+        "min_uses": MIN_USES,
+        "min_use_days": MIN_USE_DAYS,
     })))
 }
 
