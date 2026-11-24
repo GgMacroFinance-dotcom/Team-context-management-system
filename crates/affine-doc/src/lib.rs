@@ -8,6 +8,7 @@
 //! - [`doc`]：一篇文档（块树）的读写；
 //! - [`markdown`]：Markdown 子集和块互相转换；
 //! - [`sections`]：按二级标题块切成一条一条；
+//! - [`snapshot`]：BlockSuite 的文档快照（`.snapshot.json`）和 Yjs 文档互相转换；
 //! - [`workspace`]：根文档里的文档列表、文件夹树、文档属性这几张表；
 //! - [`schema`]：全部块的种类、版本、能放在哪里；不挑块的读法和结构检查；
 //! - [`order`]：AFFiNE 列表用的排序键。
@@ -18,6 +19,7 @@ pub mod model;
 pub mod order;
 pub mod schema;
 pub mod sections;
+pub mod snapshot;
 pub mod workspace;
 
 pub use doc::{
@@ -29,6 +31,8 @@ pub use sections::{Item, Section, split};
 
 #[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod snapshot_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
