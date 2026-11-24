@@ -241,7 +241,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 ## 8. 以后和 AFFiNE 同步
 
-方案草案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，等维护者定）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
+方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
 
 ## 9. 依赖
 
