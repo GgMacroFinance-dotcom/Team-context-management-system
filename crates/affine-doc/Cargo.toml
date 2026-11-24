@@ -17,3 +17,4 @@ serde_json.workspace = true
 similar.workspace = true
 thiserror.workspace = true
 yrs.workspace = true
+zip.workspace = true

@@ -86,7 +86,7 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 | --- | --- | --- | --- |
 | K0 | 这份方案 | — | 本 PR |
 | K1 | 新 crate `affine-doc`：从 `tcms-affine` 拆出不依赖 TCMS 的部分（读写块树、Markdown 子集），`tcms-affine` 改成调它；补齐全部块（28 种）的结构（先只读，认得每种块的属性，不认得的原样留着）；工作区根文档（`meta.pages`、`folders`、`docProperties`）的读写 | A1 的 13 个测试照过；每种块各造一个文档往返；AFFiNE 的 MIT 测试快照能读 | 1 到 2 个 PR，1.5 周 |
-| K2 | 导入导出：BlockSuite 快照（`.snapshot.json` 和导出的 zip）读写；Markdown 补上表格、图片引用、数据库块转成表格（只导出）；按工作区整体导出、导入 | 用 AFFiNE 自己导出的 zip 读进来再写出去，再导回 AFFiNE 看打不打得开（手动一次，记在 PR 里） | 2 个 PR，2 周 |
+| K2 | 导入导出：BlockSuite 快照（`.snapshot.json` 和导出的 zip）读写；Markdown 补上表格、图片引用、数据库块转成表格（只导出）；按工作区整体导出、导入 | 用 AFFiNE 自己导出的 zip 读进来再写出去，再导回 AFFiNE 看打不打得开（手动一次，记在 PR 里） | 3 个 PR（快照、导出包、Markdown 各一个），2 周 |
 | K3 | 同步协议客户端 `affine-sync-client`：就是 A2 的连接层挪过来 | A2 自己的测试 | A2 合并后 1 个小 PR，2 天 |
 | K4 | 本地存储：SQLite 里存更新、快照、时钟，定期合并，断网时能改、连上后补推（参考 MIT 的 `affine_nbstore` 的设计，不复制代码，不用它依赖的 AGPL crate） | 断网改、两端同时改、重启 | 1 到 2 个 PR，1.5 周 |
 | K5 | 基准 `tcms bench affine-doc`：读一篇 1 千个块的文档、合并 1 万条更新、导出整个工作区；同一份数据和 `y-octo` 比一次 | 门槛写进 `architecture.md` 第 10 节 | 1 个 PR，3 天 |
@@ -124,7 +124,23 @@ A2（TCMS #26）合并以后，把 `crates/tcms-affine-client` 原样改名成 `
   - 18 个的结构检查都没有问题。
   - 转回快照以后只有两种差别：快照里没写版本号的块被补上了版本号；JSON 里 `1.0` 写成了 `1`（在 JS 里是同一个数）。别的逐项一样。
   - 这个对照用忽略的测试 `interop_with_affine_snapshot` 跑：`AFFINE_DOC_SNAPSHOT=<文件> cargo test -p affine-doc -- --ignored`。
-- 下一步：整个工作区的导出包（`.bs.zip`：快照加 `assets/` 里的附件）和 Markdown 补表格、图片。
+- 下一步：整个工作区的导出包（`.bs.zip`：快照加 `assets/` 里的附件），见 5.5。
+
+### 5.5 K2 第二个 PR 做了什么（2026-11-24）
+
+- `bundle`：AFFiNE“导出 → 快照”出来的 `.bs.zip` 的读写，包里的样子照 BlockSuite 的导出（只读了设计）。
+  - 每篇文档一个 `<标题>-<文档 id>.snapshot.json`（两个空格缩进），图片和附件在 `assets/<blobId>.<扩展名>`。标题里的斜杠换成 `_`，免得在 zip 里多出一层目录。
+  - 读的时候跳过 `__MACOSX`、`.DS_Store`、`info.json`。AFFiNE 的白板模板外面多套了一层目录（`<名字>/assets/...`），也认。解压出来的总大小超过 1 GiB 就停，按实际解出来的字节数算。
+  - `export_docs`：几篇文档导出成一个包，附件内容由调用方按 `blobId` 给（以后从 AFFiNE 的附件存储取）；取不到的附件记下来，包照样导出，和 BlockSuite 一样。
+  - `import_docs`：包里每篇文档换一个新的文档 id，文档之间的引用（文字里的行内引用、嵌入文档块的 `pageId`）跟着换，指向包外的不动；全部写对了才记进根文档的文档列表，有一篇不对就一篇都不记。附件由调用方传到附件存储。和 BlockSuite 不同：块 id 不换，因为每篇都是新文档，块 id 不会撞。
+- 新依赖 zip 9（MIT），只开 deflate（zlib-rs），见 `architecture.md`。
+- 测试：新加 6 个。导出再读回来逐项一样、附件只取一次、缺的附件记下来；导入换 id、引用跟着换、记进文档列表；`doc::create` 写的文档过一遍包，Markdown 不变；跳过杂文件、坏 JSON 和不是文档的快照报错；有一篇坏的就一篇都不导入；MIME 到扩展名。
+- 和真 AFFiNE 对照：AFFiNE 仓库里 MIT 的模板有 17 个 AFFiNE 导出的 zip（onboarding 一个、白板模板 16 个），一共 18 篇文档、45 个附件，在本地手动跑了一遍忽略的测试 `interop_with_affine_bundle`（`AFFINE_DOC_BUNDLE=<文件>`）。
+  - 全部读得出来，18 篇的结构检查都没有问题，附件一个不缺。
+  - 每篇转进 Yjs 再转回快照，差别还是 5.4 那两种（补上版本号，`1.0` 写成 `1`）。
+  - 整包导入再导出，文档和附件个数不变，`unzip -t` 检查新包没有错。
+  - 还没把我们导出的包导回 AFFiNE 界面里看打不打得开。
+- 下一步：Markdown 补表格、图片引用，数据库块转成表格（只导出）。
 
 合计约 6 到 8 个 PR、5 到 7 周（两位工程师加 Claude；Claude 能写大部分代码，工程师主要读代码和对真 AFFiNE 验收）。
 
