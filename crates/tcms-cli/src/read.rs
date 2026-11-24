@@ -108,7 +108,7 @@ pub async fn search(repo: &Path, store: &Store, args: SearchArgs) -> Result<()> 
     Ok(())
 }
 
-async fn load(store: &Store) -> Result<SearchIndex> {
+pub(crate) async fn load(store: &Store) -> Result<SearchIndex> {
     let corpus = Corpus::load(store).await.context("从 PostgreSQL 取条目")?;
     if corpus.commit.is_none() {
         bail!("索引是空的，先运行 tcms reindex");

@@ -1,4 +1,5 @@
 //! `tcms proposals`、`tcms accept`、`tcms reject`：人处理 agent 的提议（`docs/spec.md` 第 5 节、6.2）。
+//! `tcms promote`：人发起晋升，做成一条提议。
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -6,8 +7,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde_json::json;
+use tcms_core::Scope;
 use tcms_git::{ContextRepo, Remote};
-use tcms_store::{ItemRow, ProposalRow, Store};
+use tcms_store::{Identity, ItemRow, ProposalRow, Store};
 use tcms_write::{AcceptOptions, Conflict, DiffLine, proposal_diff};
 
 use crate::{actor, author};
@@ -292,6 +294,54 @@ pub async fn accept(
         && let Some(r) = &done.remote
     {
         crate::print_remote(r);
+    }
+    Ok(())
+}
+
+/// 晋升：做成一条提议，打印它的 id。`to` 不写时提到近的那一级。
+pub async fn promote(
+    repo: &ContextRepo,
+    store: &Store,
+    id: &str,
+    to: Option<&str>,
+    reason: &str,
+    json: bool,
+) -> Result<()> {
+    let index = crate::read::load(store).await?;
+    let teams = match index.corpus().commit.as_deref() {
+        Some(c) => tcms_write::read_teams(repo, c).map_err(anyhow::Error::msg)?,
+        None => None,
+    };
+    let to: Scope = match to {
+        Some(t) => t.parse().map_err(anyhow::Error::msg)?,
+        None => {
+            let Some(item) = index.corpus().get(id) else {
+                bail!("没有这一条，或者它已经不是生效的了：{id}");
+            };
+            match tcms_write::promotion_targets(&item.scope, teams.as_ref()).first() {
+                Some(s) => s.clone(),
+                None => bail!("{id} 已经是全公司的了，没有更大的范围"),
+            }
+        }
+    };
+    // 岗位空着：是人提的，不是哪个岗位的 agent。
+    let by = Identity {
+        token_id: "cli".to_owned(),
+        name: actor(),
+        role: String::new(),
+        team: None,
+        projects: Vec::new(),
+    };
+    let p = tcms_write::promote(store, &index, id, &to, reason, teams.as_ref(), &by).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&p)?);
+    } else if p.duplicate {
+        println!("一样的晋升已经有一条在等审核：{}。", p.proposal_id);
+    } else {
+        println!(
+            "已做成晋升提议 {}：{id} 提到 {to}，批准以后写成 {}。用 tcms accept {} 批准，或在审核页处理。",
+            p.proposal_id, p.result_item_id, p.proposal_id
+        );
     }
     Ok(())
 }

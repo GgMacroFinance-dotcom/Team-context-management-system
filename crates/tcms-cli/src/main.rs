@@ -159,6 +159,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// 晋升：把一条岗位、团队、项目的生效条目提到更大的范围。做成一条提议（换了范围的取代），
+    /// 要再批准一次才生效。发起的人从环境变量 TCMS_ACTOR（没设时 USER）读。
+    Promote {
+        /// 条目 id。
+        id: String,
+        /// 提到哪个范围：team:<团队> 或 org。不写时提到近的那一级（岗位 → 它的团队，团队、项目 → org）。
+        #[arg(long)]
+        to: Option<String>,
+        /// 为什么要提到更大的范围，审核的人会看到。
+        #[arg(long)]
+        reason: String,
+        /// 用 JSON 输出。
+        #[arg(long)]
+        json: bool,
+    },
     /// 拒绝一条提议。
     Reject {
         /// 提议 id。
@@ -372,6 +387,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 ExitCode::FAILURE
             })
+        }
+        Command::Promote {
+            id,
+            to,
+            reason,
+            json,
+        } => {
+            let repo = open_repo(&cli.repo)?;
+            let store = connect(&cli.schema).await?;
+            proposals::promote(&repo, &store, &id, to.as_deref(), &reason, json).await?;
+            Ok(ExitCode::SUCCESS)
         }
         Command::Reject { id, note } => {
             let store = connect(&cli.schema).await?;

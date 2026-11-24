@@ -7,11 +7,14 @@ use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tcms_core::{Kind, Scope, utc_today};
-use tcms_git::Author;
+use tcms_core::{Kind, Scope, Teams, utc_today};
+use tcms_git::{Author, ContextRepo};
 use tcms_search::{SearchOptions, Visibility};
-use tcms_store::{ItemRow, ProposalRow, Reviewer};
-use tcms_write::{AcceptOptions, Conflict, ItemEdit, default_path, proposal_diff};
+use tcms_store::{Identity, ItemRow, ProposalRow, Reviewer};
+use tcms_write::{
+    AcceptOptions, Conflict, ItemEdit, ProposeError, default_path, promotion_targets,
+    proposal_diff, read_teams,
+};
 
 use crate::AppState;
 use crate::writer::write_error;
@@ -217,8 +220,16 @@ pub(crate) async fn proposal(State(state): State<AppState>, Path(id): Path<Strin
         ("create" | "supersede", Ok(scope), Ok(kind)) => Some(default_path(&scope, kind)),
         _ => None,
     };
+    // 换了范围的取代就是晋升：写明从哪里到哪里。
+    let promotion = match (p.action.as_str(), &current) {
+        ("supersede", Some(c)) if c.scope != p.scope => {
+            Some(json!({"from": c.scope, "to": p.scope}))
+        }
+        _ => None,
+    };
     Ok(Json(json!({
         "proposal": p,
+        "promotion": promotion,
         "current": current.as_ref().map(item_brief),
         "stale": stale,
         "diff": diff,
@@ -415,7 +426,83 @@ pub(crate) async fn item(State(state): State<AppState>, Path(id): Path<String>) 
         .filter(|it| it.supersedes.as_deref() == Some(id.as_str()))
         .map(|it| it.id.as_str())
         .collect();
-    Ok(Json(json!({"item": row, "superseded_by": superseded_by})))
+    // 生效的条目能提到哪些更大的范围（晋升）。
+    let promote_to: Vec<String> = match (row.status.as_str(), row.scope.parse::<Scope>()) {
+        ("active", Ok(scope)) => {
+            let teams = teams(&state, index.corpus().commit.as_deref());
+            promotion_targets(&scope, teams.as_ref())
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    Ok(Json(json!({
+        "item": row,
+        "superseded_by": superseded_by,
+        "promote_to": promote_to,
+    })))
+}
+
+/// 索引到的那个提交里的 `teams.yaml`。读不了时当没有（岗位只能提到全公司），写一行日志。
+fn teams(state: &AppState, commit: Option<&str>) -> Option<Teams> {
+    let commit = commit?;
+    let read = ContextRepo::open(state.writer.repo())
+        .map_err(|e| e.to_string())
+        .and_then(|repo| read_teams(&repo, commit));
+    match read {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("读 teams.yaml 出错（岗位的条目这次只能提到全公司）：{e}");
+            None
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromoteBody {
+    /// 提到哪个范围：`team:<团队>` 或 `org`。
+    to: String,
+    reason: String,
+}
+
+/// 晋升：做成一条换了范围的取代提议，提议人是审核的人，进待审核的列表，要再批准一次。
+pub(crate) async fn promote(
+    State(state): State<AppState>,
+    Extension(who): Extension<Reviewer>,
+    Path(id): Path<String>,
+    payload: Result<Json<PromoteBody>, JsonRejection>,
+) -> ApiResult {
+    let b = body(payload)?;
+    let to: Scope =
+        b.to.parse()
+            .map_err(|e: String| ApiError::new(StatusCode::BAD_REQUEST, "invalid", e))?;
+    let index = state.live.current();
+    let teams = teams(&state, index.corpus().commit.as_deref());
+    let by = Identity {
+        token_id: who.token_id.clone(),
+        name: who.name.clone(),
+        // 岗位空着：是人提的，不是哪个岗位的 agent。
+        role: String::new(),
+        team: None,
+        projects: Vec::new(),
+    };
+    match tcms_write::promote(
+        state.live.store(),
+        &index,
+        &id,
+        &to,
+        &b.reason,
+        teams.as_ref(),
+        &by,
+    )
+    .await
+    {
+        Ok(p) => Ok(Json(json!(p))),
+        Err(ProposeError::Invalid(m)) => Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid", m)),
+        Err(ProposeError::Store(e)) => Err(store_error(e)),
+    }
 }
 
 #[derive(Deserialize)]
