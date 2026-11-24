@@ -223,6 +223,7 @@ enum Command {
         )]
         allowed_hosts: Vec<String>,
         /// 配了远端时，每隔多少秒和远端同步一次（拉人推上去的改动、补推没推上去的提交）。0 是只在批准、改单条时同步。
+        /// 环境变量 TCMS_WEBHOOK_SECRET 配了时，远端的推送通知（POST /hooks/push）来了马上同步。
         #[arg(long, env = "TCMS_SYNC_SECS", default_value_t = 60)]
         sync_secs: u64,
     },
@@ -484,6 +485,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     repo: cli.repo.clone(),
                     remote,
                     sync_every: std::time::Duration::from_secs(sync_secs),
+                    webhook_secret: std::env::var("TCMS_WEBHOOK_SECRET")
+                        .ok()
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty()),
                 },
             )
             .await?;

@@ -11,9 +11,12 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+hex.workspace = true
+hmac.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tcms-core.workspace = true
 tcms-git.workspace = true
 tcms-mcp.workspace = true

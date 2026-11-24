@@ -127,7 +127,7 @@ Item: ctx_01JDX4M6Q8...
 Edited-by: 王审核（tok_01JDX4...）
 ```
 
-**人直接改**：在服务器上改、或者推到远端。推到远端的，服务定时拉下来（下面“远端”），新标题补上 id，重建改动部分的索引；在服务器上直接改的，提交以后运行 `tcms reindex` 或重启服务。远端的 webhook 和本地文件监听（notify）还没做。
+**人直接改**：在服务器上改、或者推到远端。推到远端的，服务定时、或者收到远端的推送通知（webhook）时拉下来（下面“远端”），新标题补上 id，重建改动部分的索引；在服务器上直接改的，提交以后运行 `tcms reindex` 或重启服务。本地文件监听（notify）还没做。
 
 **只有一个写入方**：一个 schema 同一时间只处理一条提议（上面第 1 步），所以命令行和服务同时批准也不会丢提交（测试里 4 个进程、每个进程同时批准 3 条，12 个提交都在 HEAD 的历史上；去掉锁时测试会失败）。提交前先拉远端；git 合并不了时，这条提议还是待审核，等人合并，不强推。
 
@@ -141,6 +141,7 @@ Edited-by: 王审核（tok_01JDX4...）
 - 补 id（`crates/tcms-write/src/ids.rs`）：拉完 HEAD 变了（快进或合并），先记下拉之前的 HEAD，看从它到新 HEAD 新增、改过哪些文件，只给这些文件里没有 id 的条目补 id，照着新 HEAD 做成一个提交（`补 id：远端新来的 N 条`，提交者和这次合并一样），再往下走：同步时接着更新索引、推；批准、改单条时接着照常改、提交，两个提交一起推上去。只扫拉下来的文件，不每次扫整个仓库：一次同步多花的只是比较两个提交的文件列表（拉下来新提交时才做）。补不成（比如工作区不干净）只记在结果的错里，这些条目留给 `tcms assign-ids`。人的克隆里要 `git pull` 一下才有这些 id；拉之前人又改了同一个标题下面那一行，就是一次普通的合并冲突（上面“合并不了”）。
 - 拉完 HEAD 变了也不用重开仓库：gix 每次从磁盘读引用，找不到的对象会重新扫一遍包目录（测试里拉之前打开的仓库对象，拉完照样能读、能提交）。
 - 服务里的定时同步交给审核页的那个写入线程（上面），和批准、改单条排同一个队；只在拉到新提交、推上去了、或者出错的情况变了时写日志。
+- 推送通知（`crates/tcms-review/src/hooks.rs`，2026-11-24）：`POST /hooks/push` 核对签名（HMAC-SHA256 用 `hmac`、`sha2`，比较是常数时间的；GitLab 的令牌比两边的 SHA-256），对了就叫醒同步循环（`Writer::spawn_sync_loop`，一个 `tokio::sync::Notify`），马上回 202。同步循环等定时的那一下或者推送通知，哪个先到做哪个；同步做的时候又来的通知只留一个，所以连着推几次最多再同步一次。不解析请求体，签名对了就同步：同步只管配好的那个分支，多同步一次只是多一次 `git fetch`。请求体最多 8 MB（GitHub 的推送通知最多 25 MB，多数几 KB），更大的回 413，等定时同步。这个地址不查 `Host`（靠签名认人，也不回数据），反向代理可以只把它放出去。本机裸仓库、debug 构建试了两次：从调 webhook 到审核页查得到新条目 0.1 秒和 0.7 秒（拉、索引、换上新的检索索引）。
 
 **条目在提议之后被人改过**（`base_revision` 落后）：和 `spec.md` 第 5 节一样，要人看过合并结果再接受。
 
@@ -220,14 +221,14 @@ Edited-by: 王审核（tok_01JDX4...）
   - 令牌存在浏览器的 sessionStorage 里（关掉标签页就没了），每次请求放在请求头里，不用 cookie，所以没有跨站请求伪造的问题。页面只用 `textContent` 和建元素写内容，不拼 HTML。
   - 响应头：`Content-Security-Policy`（`default-src 'none'`，脚本、样式、请求只许同源，`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。和 `/mcp` 一样只接受 `Host` 是本机或 `--allowed-host` 写了的请求。
   - 出错时回 `{"error": 一句话, "code": ..., "current": 现在的版本号（版本落后时）}`：没找到 404，不是待审核、版本落后、目标没了、仓库正忙（HEAD 变了或工作区不干净）409，参数不对 400。
-  - 和远端同步的情况：写入线程每次和远端打交道（定时同步、批准、改单条）以后，把结果记在内存里（`RemoteStatus`：远端、同步间隔、最近一次的时间和拉推结果、最近一次没出错的时间、合并不了时的说明；服务重启以后从头记）。`GET /api/remote` 返回它和服务器现在的时间（`now_ms`，网页拿它算“几分钟前”，不受浏览器时钟的影响）。页面登录以后、每 30 秒、每次批准或保存以后取一次，在顶上显示一行；没配远端时不显示。合并不了的说明从批准、改单条回的错误或同步结果里取，下次拉成功了就清掉。
+  - 和远端同步的情况：写入线程每次和远端打交道（定时同步、推送后同步、批准、改单条）以后，把结果记在内存里（`RemoteStatus`：远端、同步间隔、配没配推送通知、最近一次收到推送通知的时间、最近一次的时间和拉推结果、最近一次没出错的时间、合并不了时的说明；服务重启以后从头记）。`GET /api/remote` 返回它和服务器现在的时间（`now_ms`，网页拿它算“几分钟前”，不受浏览器时钟的影响）。页面登录以后、每 30 秒、每次批准或保存以后取一次，在顶上显示一行；没配远端时不显示。合并不了的说明从批准、改单条回的错误或同步结果里取，下次拉成功了就清掉。
   - 提交者是审核的人的名字，邮箱从 `TCMS_GIT_EMAIL` 读（没设时 `tcms@localhost`）；上下文仓库从 `--repo` 或 `TCMS_REPO` 读，打不开时启动时提醒，页面能看，写会失败。
 - 鉴权：Bearer 令牌（`tcms_` 加 64 位十六进制，32 字节随机数），库里只存 SHA-256。令牌绑定身份（岗位、团队、能声明的项目），身份决定范围（`spec.md` 6.1）。令牌用 `tcms token add|list|revoke` 管，发和吊销记进 `audit`。
 
 **在智能岗位服务器上**
 
 - 一个 PostgreSQL（和 I.P. 共用，见第 5 节），`tcms` 作为 systemd 服务，上下文仓库在 `/var/lib/tcms/context`，可以配一个客户自己的远端（GitHub、Gitea 等）。
-- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`，远端的 `TCMS_REMOTE`、`TCMS_REMOTE_BRANCH`、`TCMS_GIT_TOKEN`、`TCMS_GIT_USERNAME`、`TCMS_SYNC_SECS`）。
+- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`，远端的 `TCMS_REMOTE`、`TCMS_REMOTE_BRANCH`、`TCMS_GIT_TOKEN`、`TCMS_GIT_USERNAME`、`TCMS_SYNC_SECS`、`TCMS_WEBHOOK_SECRET`）。
 
 **客户自己改造部署**
 

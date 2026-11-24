@@ -876,6 +876,192 @@ async fn remote_push_and_needs_merge() {
     f.store.drop_schema().await.unwrap();
 }
 
+/// 远端推送的 webhook：签名对了马上同步一次，人推上去的条目进索引，不用等定时同步（这里定时是 60 秒）。
+#[tokio::test]
+async fn push_hook_syncs_right_away() {
+    use hmac::{Hmac, KeyInit, Mac};
+    const SECRET: &str = "test-webhook-secret-0123456789";
+    const NEW: &str = "ctx_01JDX4M6Q8GGGGGGGGGGGGGGGG";
+    let remote_dir = tempfile::tempdir().unwrap();
+    let bare = remote_dir.path().join("remote.git");
+    human(remote_dir.path(), &["init", "-q", "--bare", "remote.git"]);
+    let remote = Remote::new(bare.to_str().unwrap(), Some("main"), false).unwrap();
+    let Some(f) = fixture_with(|_| Some(remote.clone())).await else {
+        return;
+    };
+    let hook = tcms_review::push_hook(f.writer.clone(), SECRET.to_owned());
+    let author = Author {
+        name: "tcms".into(),
+        email: "tcms@localhost".into(),
+    };
+    let sign = |body: &[u8]| {
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+        mac.update(body);
+        let tag: Vec<u8> = mac.finalize().into_bytes().to_vec();
+        tag.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let deliver = |headers: Vec<(&'static str, String)>, body: &'static str| {
+        let hook = hook.clone();
+        async move {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/hooks/push")
+                // 不查 Host：推送通知从外面来，Host 是对外的域名。
+                .header(header::HOST, "hooks.example.net")
+                .header(header::CONTENT_TYPE, "application/json");
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            let r = hook
+                .oneshot(req.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            let status = r.status();
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    // 等审核页顶上那一行记下的最近一次同步满足条件。
+    let wait_for = |pred: fn(&Value) -> bool| {
+        let f = &f;
+        async move {
+            for _ in 0..200 {
+                let st = get(f, "/api/remote").await;
+                if pred(&st) {
+                    return st;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("等不到：{}", get(f, "/api/remote").await);
+        }
+    };
+
+    let looped = f.writer.spawn_sync_loop(author);
+    // 起来马上同步一次：推上去。
+    let st = wait_for(|st| st["last"]["what"] == "sync").await;
+    assert_eq!(st["last"]["report"]["pushed_new"], true, "{st}");
+    assert_eq!(st["webhook"], true, "{st}");
+    assert!(st["last_push_ms"].is_null(), "{st}");
+    let first_sync = st["last"]["at_ms"].clone();
+
+    // 人推了一条新的。
+    human(
+        remote_dir.path(),
+        &["clone", "-q", bare.to_str().unwrap(), "human"],
+    );
+    let clone = remote_dir.path().join("human");
+    std::fs::write(
+        clone.join("role-macro/PMI.md"),
+        format!(
+            "## PMI 用制造业的\n<!-- ctx id={NEW} kind=fact -->\n周报里的 PMI 默认指制造业 PMI。\n"
+        ),
+    )
+    .unwrap();
+    human(&clone, &["add", "."]);
+    human(&clone, &["commit", "-q", "-m", "人加了一条"]);
+    human(&clone, &["push", "-q", "origin", "main"]);
+    let body = r#"{"ref":"refs/heads/main"}"#;
+
+    // 没签名、签错了、密钥不对：401，不同步。
+    let (status, v) = deliver(vec![("x-github-event", "push".into())], body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+    assert_eq!(v["code"], "bad_signature");
+    let wrong = format!("sha256={}", sign(br#"{"ref":"refs/heads/other"}"#));
+    let (status, _) = deliver(
+        vec![
+            ("x-github-event", "push".into()),
+            ("x-hub-signature-256", wrong),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = deliver(vec![("x-gitlab-token", "not-the-secret".into())], body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // GitHub 建 webhook 时的 ping、别的事件：签名对，但不同步。
+    let (status, v) = deliver(
+        vec![
+            ("x-github-event", "ping".into()),
+            (
+                "x-hub-signature-256",
+                format!("sha256={}", sign(body.as_bytes())),
+            ),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(
+        (status, v["event"].as_str()),
+        (StatusCode::OK, Some("ping"))
+    );
+    let (status, v) = deliver(
+        vec![
+            ("x-github-event", "issues".into()),
+            (
+                "x-hub-signature-256",
+                format!("sha256={}", sign(body.as_bytes())),
+            ),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(
+        (status, v["ignored"].as_str()),
+        (StatusCode::OK, Some("issues"))
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let st = get(&f, "/api/remote").await;
+    assert_eq!(st["last"]["at_ms"], first_sync, "没有推送不该同步：{st}");
+    assert!(st["last_push_ms"].is_null(), "{st}");
+
+    // GitHub 的推送：马上同步，新条目进索引。
+    let (status, v) = deliver(
+        vec![
+            ("x-github-event", "push".into()),
+            (
+                "x-hub-signature-256",
+                format!("sha256={}", sign(body.as_bytes())),
+            ),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+    let st = wait_for(|st| st["last"]["what"] == "push").await;
+    assert_eq!(st["last"]["report"]["head_moved"], true, "{st}");
+    assert!(st["last_push_ms"].as_u64().is_some(), "{st}");
+    let item = get(&f, &format!("/api/items/{NEW}")).await;
+    assert_eq!(item["item"]["title"], "PMI 用制造业的", "{item}");
+
+    // Gitea 的签名、GitLab 的令牌也认；没有新提交，同步一次什么都没拉到。
+    let pushed_at = st["last"]["at_ms"].as_u64().unwrap();
+    let (status, _) = deliver(
+        vec![
+            ("x-gitea-event", "push".into()),
+            ("x-gitea-signature", sign(body.as_bytes())),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let st =
+        wait_for(|st| st["last"]["what"] == "push" && st["last"]["report"]["head_moved"] == false)
+            .await;
+    assert!(st["last"]["at_ms"].as_u64().unwrap() >= pushed_at, "{st}");
+    let (status, _) = deliver(
+        vec![
+            ("x-gitlab-event", "Push Hook".into()),
+            ("x-gitlab-token", SECRET.into()),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    looped.abort();
+    f.store.drop_schema().await.unwrap();
+}
+
 /// 晋升：条目页给出能提到的范围；提了以后是一条待审核的提议，标成晋升，批准以后原来那条被取代。
 #[tokio::test]
 async fn promote_from_item_page() {

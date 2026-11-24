@@ -103,7 +103,7 @@
 
   // 页面顶上一行：配了远端时，最近一次同步的结果；合并不了时写明哪些文件、怎么合并。没配远端时不显示。
   const remoteBar = document.getElementById("remote");
-  const WHAT = { sync: "同步", accept: "批准时同步", edit: "改单条时同步" };
+  const WHAT = { sync: "同步", push: "收到推送后同步", accept: "批准时同步", edit: "改单条时同步" };
 
   function ago(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
@@ -128,7 +128,10 @@
       return;
     }
     const when = (ms) => ago(s.now_ms - ms);
-    const parts = [`远端 ${s.remote}`, s.sync_secs ? `每 ${s.sync_secs} 秒同步一次` : "只在批准、改单条时同步"];
+    const how = [];
+    if (s.webhook) how.push("推送后马上同步");
+    if (s.sync_secs) how.push(`每 ${s.sync_secs} 秒同步一次`);
+    const parts = [`远端 ${s.remote}`, how.length ? how.join("、") : "只在批准、改单条时同步"];
     let cls = "";
     let detail = null;
     const last = s.last;
