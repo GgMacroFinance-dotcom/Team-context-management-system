@@ -241,7 +241,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 ## 8. 以后和 AFFiNE 同步
 
-方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写（`crates/affine-doc`，第一步 A1 2026-11-24 已做，同一天从 `crates/tcms-affine` 搬过去）；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
+方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写（`crates/affine-doc`，第一步 A1 2026-11-24 已做，同一天从 `crates/tcms-affine` 搬过去）；连 AFFiNE 的登录、同步协议、GraphQL 在 `crates/tcms-affine-client`（第二步 A2 2026-11-24 已做，不用 TCMS 自己的类型）；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
 
 ## 9. 依赖
 
@@ -267,9 +267,10 @@ Edited-by: 王审核（tok_01JDX4...）
 | 内存分配器 | tikv-jemallocator 0.7（带着 jemalloc 5.3 的源码，构建时用 C 编译器和 make 编；开后台线程；MSVC 上不用，用系统自带的） | MIT 或 Apache-2.0；jemalloc 本身是 BSD-2-Clause |
 | 测试审核页的接口（只在测试里） | tower 0.5（util）、http-body-util 0.1 | MIT |
 | 和 AFFiNE 同步：Yjs 文档 | yrs 0.28（不开默认特性，开 `small-client`：客户端 id 32 位，和 AFFiNE 用的 yjs 13.6 一样） | MIT |
-| 以后：和 AFFiNE 同步时自己写的 socket.io 客户端（`affine-sync.md` 第 6 节） | tokio-tungstenite | MIT |
+| 和 AFFiNE 的连接（`crates/tcms-affine-client`）：WebSocket 和自己写的 socket.io 那一层 | tokio-tungstenite 0.29（不开默认特性，只要握手；带进来 tungstenite） | MIT（tungstenite 是 MIT 或 Apache-2.0） |
+| 和 AFFiNE 的连接：TLS、HTTP | tokio-rustls 0.26（ring，不用 aws-lc-rs）、webpki-roots 1、rustls-pki-types 1；hyper 1（只开客户端、http1）、hyper-util、http-body-util；base64 0.22 | MIT 或 Apache-2.0；webpki-roots 是 CDLA-Permissive-2.0 |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），和 AFFiNE 同步第一步 A1 以后 443 个（多了 yrs 和它带进来的 async-lock、event-listener-strategy、smallstr，加上 tcms-affine），把 A1 搬进 affine-doc 以后 444 个（只多了 affine-doc 自己），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），和 AFFiNE 同步第一步 A1 以后 443 个（多了 yrs 和它带进来的 async-lock、event-listener-strategy、smallstr，加上 tcms-affine），把 A1 搬进 affine-doc 以后 444 个（只多了 affine-doc 自己），A2 以后 454 个（多了 tokio-tungstenite、tungstenite 和它带进来的 sha1、digest、block-buffer、crypto-common、cpufeatures（0.2）、data-encoding，tokio-rustls，加上 tcms-affine-client），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 

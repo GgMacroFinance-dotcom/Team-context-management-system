@@ -1,0 +1,282 @@
+//! 对着真的 AFFiNE 测（自托管，0.27.5 起）。要设：
+//!
+//! - `AFFINE_TEST_URL`（比如 `http://127.0.0.1:3010`）
+//! - `AFFINE_TEST_EMAIL`、`AFFINE_TEST_PASSWORD`：一个能建工作区的账号
+//!
+//! 没设就跳过（CI 里没有 AFFiNE）。每跑一次新建一个工作区，不删。
+
+use std::time::Duration;
+
+use affine_doc::{RandomIds, Section, workspace};
+use tcms_affine_client::{
+    Client, Config, Credentials, DocMode, Error, Intent, SyncConnection, SyncEvent,
+    comment_content, comment_text,
+};
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
+use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
+
+fn config() -> Option<Config> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (url, email, password) = (
+        var("AFFINE_TEST_URL")?,
+        var("AFFINE_TEST_EMAIL")?,
+        var("AFFINE_TEST_PASSWORD")?,
+    );
+    Some(Config {
+        url,
+        credentials: Credentials { email, password },
+        client_version: None,
+        extra_ca: None,
+    })
+}
+
+fn apply(doc: &Doc, update: &[u8]) {
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(update).unwrap())
+        .unwrap();
+}
+
+fn markdown(doc: &Doc) -> String {
+    affine_doc::to_markdown(&affine_doc::read(doc).unwrap().blocks)
+}
+
+/// 工作区根文档的 `meta.pages` 里加一篇，返回这次的差量。
+fn add_page(root: &Doc, id: &str, title: &str) -> Vec<u8> {
+    let sv = root.transact().state_vector();
+    workspace::upsert_doc_meta(root, &workspace::DocMeta::new(id, title, 1.7e12));
+    root.transact().encode_state_as_update_v1(&sv)
+}
+
+/// 等下一次某篇文档的修改，别的事件跳过。
+async fn next_update(conn: &mut SyncConnection, doc_id: &str) -> (Vec<Vec<u8>>, Option<String>) {
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), conn.next_event())
+            .await
+            .expect("等修改超时")
+            .expect("连接没了");
+        if let SyncEvent::DocUpdates {
+            doc_id: d,
+            updates,
+            editor,
+            ..
+        } = ev
+            && d == doc_id
+        {
+            return (updates, editor);
+        }
+    }
+}
+
+#[tokio::test]
+async fn sync_with_a_real_affine() {
+    let Some(config) = config() else {
+        eprintln!("没设 AFFINE_TEST_URL、AFFINE_TEST_EMAIL、AFFINE_TEST_PASSWORD，跳过");
+        return;
+    };
+    let client = Client::new(config.clone()).unwrap();
+    let info = client.server_info().await.unwrap();
+    assert!(
+        info.version.starts_with("0.27.5") || info.version.as_str() > "0.27.5",
+        "{info:?}"
+    );
+    let user = client.user_id().await.unwrap();
+
+    // 新工作区：先推根文档，再推一篇文档，再把它记进根文档的文档列表
+    let ws = client.create_workspace().await.unwrap();
+    let mut a = client.sync().await.unwrap();
+    let root = Doc::new();
+    let first = add_page(&root, "tcmsTest01", "测试文档");
+    assert!(
+        a.push_update(&ws, &ws, &first, Intent::Create)
+            .await
+            .unwrap()
+            .timestamp
+            > 0
+    );
+    let page = Doc::new();
+    let md = "## 第一条\n\n正文 **粗体** 和 `代码`\n\n- 列表\n  - 下一级\n\n## 第二条\n\n1. 编号\n";
+    affine_doc::create(
+        &page,
+        "测试文档",
+        &affine_doc::to_blocks(md),
+        &mut RandomIds,
+    )
+    .unwrap();
+    let doc_id = "tcmsTest01";
+    let full = page
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let pushed = a
+        .push_update(&ws, doc_id, &full, Intent::Create)
+        .await
+        .unwrap();
+    assert!(pushed.created);
+
+    // 读回来一样
+    let loaded = a.load_doc(&ws, doc_id, None).await.unwrap().unwrap();
+    let back = Doc::new();
+    apply(&back, &loaded.update);
+    assert_eq!(markdown(&back), md.trim_end());
+    assert_eq!(affine_doc::read(&back).unwrap().title, "测试文档");
+    let loaded_root = a.load_doc(&ws, &ws, None).await.unwrap().unwrap();
+    let root_back = Doc::new();
+    apply(&root_back, &loaded_root.update);
+    let pages = workspace::read_meta(&root_back).pages;
+    assert!(
+        pages
+            .iter()
+            .any(|p| p.id == "tcmsTest01" && p.title == "测试文档"),
+        "{pages:?}"
+    );
+    assert!(a.load_doc(&ws, "noSuchDoc", None).await.unwrap().is_none());
+
+    // 另一条连接收得到这条连接推的修改
+    let mut b = client.sync().await.unwrap();
+    let b_doc = Doc::new();
+    apply(
+        &b_doc,
+        &b.load_doc(&ws, doc_id, None).await.unwrap().unwrap().update,
+    );
+    let item = |doc: &Doc, n: usize| {
+        affine_doc::split(&affine_doc::read(doc).unwrap().blocks)
+            .into_iter()
+            .filter_map(|s| match s {
+                Section::Item(i) => Some(i),
+                Section::Loose(_) => None,
+            })
+            .nth(n)
+            .unwrap()
+    };
+    let sv = page.transact().state_vector();
+    let it = item(&page, 1);
+    let body = affine_doc::to_blocks("1. 编号\n\nA 加的一段");
+    affine_doc::update_item(
+        &page,
+        it.heading_id.as_deref().unwrap(),
+        &it.title,
+        &body,
+        &mut RandomIds,
+    )
+    .unwrap();
+    let delta = page.transact().encode_state_as_update_v1(&sv);
+    a.push_update(&ws, doc_id, &delta, Intent::Update)
+        .await
+        .unwrap();
+    let (updates, editor) = next_update(&mut b, doc_id).await;
+    assert_eq!(editor.as_deref(), Some(user.as_str()));
+    for u in &updates {
+        apply(&b_doc, u);
+    }
+    assert!(markdown(&b_doc).contains("A 加的一段"));
+    assert_eq!(markdown(&b_doc), markdown(&page));
+
+    // 哪些文档变过
+    let ts = a.doc_timestamps(&ws, None).await.unwrap();
+    assert!(ts.contains_key(doc_id) && ts.contains_key(&ws), "{ts:?}");
+    let later = a.doc_timestamps(&ws, Some(i64::MAX - 1)).await.unwrap();
+    assert!(later.is_empty(), "{later:?}");
+
+    // 断开重连：重新加入以后还收得到别人改的
+    a.reconnect().await;
+    let mut saw_disconnect = false;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), a.next_event())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            SyncEvent::Disconnected { .. } => saw_disconnect = true,
+            SyncEvent::Reconnected => break,
+            _ => {}
+        }
+    }
+    assert!(saw_disconnect);
+    let sv = b_doc.transact().state_vector();
+    let it = item(&b_doc, 0);
+    let body = affine_doc::to_blocks("正文 **粗体** 和 `代码`\n\nB 在重连以后加的");
+    affine_doc::update_item(
+        &b_doc,
+        it.heading_id.as_deref().unwrap(),
+        &it.title,
+        &body,
+        &mut RandomIds,
+    )
+    .unwrap();
+    let delta = b_doc.transact().encode_state_as_update_v1(&sv);
+    b.push_update(&ws, doc_id, &delta, Intent::Update)
+        .await
+        .unwrap();
+    let (updates, _) = next_update(&mut a, doc_id).await;
+    for u in &updates {
+        apply(&page, u);
+    }
+    assert!(markdown(&page).contains("B 在重连以后加的"));
+
+    // 拿状态向量取差量：跟上以后什么都不缺
+    let sv = page.transact().state_vector().encode_v1();
+    let diff = a.load_doc(&ws, doc_id, Some(&sv)).await.unwrap().unwrap();
+    apply(&page, &diff.update);
+    assert_eq!(markdown(&page), markdown(&b_doc));
+    let before = page.transact().state_vector();
+    apply(&page, &diff.update);
+    assert_eq!(page.transact().state_vector(), before);
+
+    // GraphQL：工作区、最近改过的文档、评论
+    assert!(
+        client
+            .workspaces()
+            .await
+            .unwrap()
+            .iter()
+            .any(|w| w.id == ws)
+    );
+    let recent = client.recently_updated_docs(&ws, 20, None).await.unwrap();
+    assert!(
+        recent.items.iter().any(|d| d.id == doc_id),
+        "{:?}",
+        recent.items
+    );
+    let content = comment_content(&["提议：把第二条改成这样", "理由：……"], Some("编号")).unwrap();
+    let c = client
+        .create_comment(&ws, doc_id, "测试文档", DocMode::Page, content)
+        .await
+        .unwrap();
+    let listed = client.comments(&ws, doc_id).await.unwrap();
+    let found = listed.iter().find(|x| x.id == c.id).unwrap();
+    assert_eq!(
+        comment_text(&found.content),
+        "提议：把第二条改成这样\n理由：……"
+    );
+    assert_eq!(found.user_id, user);
+    client.resolve_comment(&c.id, true).await.unwrap();
+    assert!(
+        client
+            .comments(&ws, doc_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|x| x.id == c.id && x.resolved)
+    );
+    let changes = client.comment_changes(&ws, doc_id, None).await.unwrap();
+    assert!(
+        changes.items.iter().any(|ch| ch.id == c.id),
+        "{:?}",
+        changes.items
+    );
+    client.delete_comment(&c.id).await.unwrap();
+    assert!(
+        !client
+            .comments(&ws, doc_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|x| x.id == c.id)
+    );
+
+    // 登录不上（用一个不存在的账号，免得连着试错密码把测试账号锁住）
+    let mut wrong = config;
+    wrong.credentials.email = format!("nobody-{}@example.test", &ws[..8]);
+    let err = Client::new(wrong).unwrap().sync().await.err().unwrap();
+    assert!(matches!(err, Error::Auth(_)), "{err}");
+}
