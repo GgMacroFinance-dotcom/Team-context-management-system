@@ -12,8 +12,8 @@ use tcms_git::{Author, ContextRepo};
 use tcms_search::{SearchOptions, Visibility};
 use tcms_store::{Identity, ItemRow, ProposalRow, Reviewer};
 use tcms_write::{
-    AcceptOptions, Conflict, ItemEdit, ProposeError, default_path, promotion_targets,
-    proposal_diff, read_teams,
+    AcceptOptions, Conflict, ItemEdit, ProposeError, default_path, promotion_candidates,
+    promotion_targets, proposal_diff, read_teams,
 };
 
 use crate::AppState;
@@ -21,6 +21,8 @@ use crate::writer::write_error;
 
 /// 浏览时一次最多列几条。
 const MAX_LIST: usize = 500;
+/// 晋升候选一次最多列几组。
+const MAX_CANDIDATES: usize = 50;
 
 #[derive(Debug)]
 pub(crate) struct ApiError {
@@ -457,6 +459,52 @@ fn teams(state: &AppState, commit: Option<&str>) -> Option<Teams> {
             None
         }
     }
+}
+
+/// 系统找的晋升候选：几个岗位（或团队、项目）都写了的相近条目，建议提到哪里（`docs/spec.md` 第 5 节）。
+/// 哪条已经有晋升提议在等审核，带上那条提议的 id（`pending`）。
+pub(crate) async fn promotions(State(state): State<AppState>) -> ApiResult {
+    let index = state.live.current();
+    let corpus = index.corpus();
+    let teams = teams(&state, corpus.commit.as_deref());
+    let all = promotion_candidates(corpus, teams.as_ref());
+    let open = state
+        .live
+        .store()
+        .list_proposals(Some("open"))
+        .await
+        .map_err(store_error)?;
+    // 等审核的晋升：换了范围的取代。
+    let pending = |id: &str, scope: &str| -> Option<String> {
+        open.iter()
+            .find(|p| {
+                p.action == "supersede" && p.item_id.as_deref() == Some(id) && p.scope != scope
+            })
+            .map(|p| p.id.clone())
+    };
+    let candidates: Vec<Value> = all
+        .iter()
+        .take(MAX_CANDIDATES)
+        .map(|c| {
+            let items: Vec<Value> = c
+                .items
+                .iter()
+                .map(|it| {
+                    json!({
+                        "id": it.id, "scope": it.scope, "title": it.title, "revision": it.revision,
+                        "pending": pending(&it.id, &it.scope),
+                    })
+                })
+                .collect();
+            json!({"to": c.to, "kind": c.kind, "items": items})
+        })
+        .collect();
+    Ok(Json(json!({
+        "total": all.len(),
+        "limit": MAX_CANDIDATES,
+        "commit": corpus.commit,
+        "candidates": candidates,
+    })))
 }
 
 #[derive(Deserialize)]

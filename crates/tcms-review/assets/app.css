@@ -157,3 +157,10 @@ textarea { min-height: 220px; font-family: var(--mono); font-size: 13px; resize:
 
 /* 上面的 display 会盖过浏览器给 hidden 的默认样式，这里补回来。 */
 [hidden] { display: none !important; }
+
+/* 可以晋升的：每组一个小标题、几条、一个表单。 */
+.candidate { margin-bottom: 28px; }
+.candidate h2 { margin-top: 0; }
+.candidate .panel + form { margin-top: 8px; }
+/* 晋升的理由是一两句话，不用正文那么高的框。 */
+textarea.reason { min-height: 72px; font-family: inherit; font-size: inherit; }

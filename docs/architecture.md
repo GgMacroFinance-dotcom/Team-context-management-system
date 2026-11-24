@@ -116,6 +116,8 @@ Accepted-by: <审核的人>
 
 **晋升**（`crates/tcms-write/src/promote.rs`，规则见 `spec.md` 第 5 节）：人在审核页或 `tcms promote` 发起，做成一条 `supersede` 提议，范围换成更大的那个，标题、正文、类型、标签、复核日期照抄当时的条目，`base_revision` 记当时的版本号，相近的条目按新范围找；存提议、查重复、挡乱提和 agent 的提议走同一段代码（`propose::save`）。提议人是发起的人，`proposer_role` 空着；审核页上发起时 `proposer_token` 是审核的人的令牌 id，命令行是 `cli`。岗位属于哪个团队从索引到的那个提交里的 `teams.yaml` 查（审核页每次打开条目时只读地打开上下文仓库读一次）。批准走的是普通的取代：新条目写进新范围的默认文件，原来那条变成被取代。
 
+**系统找晋升候选**（`crates/tcms-write/src/candidates.rs`，2026-11-24）：在内存里那份条目（`Corpus`）上算，不查数据库。岗位和岗位比，团队、项目和团队、项目比；同一类型，相近的算法和找相近的条目一样（`conflicts.rs` 的 `score`：标题共有的词数 / 词少的那边的词数，和标签的交集 / 并集，取大的，到 50 算相近）。两两比 1 万条要比约 5 千万对，所以先按（类型，标题的词或标签）建倒排，对每一条只走它的词和标签的倒排，边走边数和别的条目共有几个词、几个标签，只算至少有一个相同的。相近的用并查集连成一组，至少跨两个范围才算。要提到的范围：都是岗位、又都在 `teams.yaml` 的同一个团队里时是那个团队，别的都是全公司；那个范围里已经有和组里某一条相近的条目时不建议。结果按跨几个范围、几条排，同样的条目结果一样。审核页每次打开“可以晋升的”算一次（1 万条约 55 到 65 毫秒，第 10 节），不缓存。
+
 **人在审核页改单条**（`crates/tcms-write/src/edit_item.rs`）：和批准排同一个队（同一把进程锁和 advisory lock），索引带到 HEAD，条目要还是生效的、版本号要和打开页面时一样，然后像批准“修改”一样只替换那一条的文字（元数据里没改的字段原样保留，比如 `owner`），提交，增量索引，记审计 `item.edit`。提交信息：
 
 ```text
@@ -214,7 +216,7 @@ Edited-by: 王审核（tok_01JDX4...）
   - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
 - 审核页（`crates/tcms-review`，第 5 步）：和 `/mcp` 在同一个 axum 服务里（`--stdio` 时没有）。
   - `/review` 是一个静态页面，`app.js`、`app.css` 编进二进制（`include_str!`），不用构建前端，不加载外部资源；`/` 跳到 `/review`。
-  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`items/{id}/promote`（晋升，做成一条提议）、`remote`（和远端同步的情况，下面）。`items/{id}` 带上 `promote_to`（这一条能提到哪些范围），`proposals/{id}` 带上 `promotion`（换了范围的取代：从哪里到哪里）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
+  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`items/{id}/promote`（晋升，做成一条提议）、`promotions`（系统找的晋升候选，最多 50 组，组里哪一条已经有晋升提议在等审核时带上提议 id）、`remote`（和远端同步的情况，下面）。`items/{id}` 带上 `promote_to`（这一条能提到哪些范围），`proposals/{id}` 带上 `promotion`（换了范围的取代：从哪里到哪里）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
   - 令牌存在浏览器的 sessionStorage 里（关掉标签页就没了），每次请求放在请求头里，不用 cookie，所以没有跨站请求伪造的问题。页面只用 `textContent` 和建元素写内容，不拼 HTML。
   - 响应头：`Content-Security-Policy`（`default-src 'none'`，脚本、样式、请求只许同源，`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。和 `/mcp` 一样只接受 `Host` 是本机或 `--allowed-host` 写了的请求。
   - 出错时回 `{"error": 一句话, "code": ..., "current": 现在的版本号（版本落后时）}`：没找到 404，不是待审核、版本落后、目标没了、仓库正忙（HEAD 变了或工作区不干净）409，参数不对 400。
@@ -277,6 +279,7 @@ Edited-by: 王审核（tok_01JDX4...）
 | 从 PostgreSQL 取出 1 万条生效条目 | 不设 | 68 毫秒 |
 | 在 1 万条上建检索索引 | 不设 | 215 到 300 毫秒 |
 | 取条目和建检索索引多用的内存（1 万条） | 不设 | 约 33 MB |
+| 找一次晋升候选（1 万条，审核页打开“可以晋升的”时算） | < 250 毫秒 | 55 到 65 毫秒，20 组（2026-11-24；两两比时 245 毫秒） |
 | 一个只改了一个文件的提交，到索引更新完 | < 200 毫秒 | 17 毫秒 |
 | 从头重建 1 万条目的索引（空库） | < 3 秒（原估 10 秒，实测后收紧） | 288 毫秒 |
 | 1 万条目、没有变更的全量索引 | 不设 | 63 毫秒 |
@@ -294,7 +297,7 @@ Edited-by: 王审核（tok_01JDX4...）
 | 换过 5 次索引以后的物理内存（1 万条，刚换完） | < 160 MB | 约 97 到 106 MB（同上；原来用 glibc 时约 73 到 96 MB，改成专门线程之前约 220 MB，还在涨） |
 | 空闲时内存（1 万条，换过 5 次索引以后不发请求，等 20 秒以上、稳下来） | < 50 MB | 约 40 到 41 MB（原来用 glibc 时约 86 MB，等多久都不降）；1000 条约 27 MB（glibc 约 43 MB） |
 
-`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
+`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项（含找一次晋升候选），`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
 
 加行级安全时（2026-11-24）用普通账号和超级用户各跑了一遍 `bench index`、`bench read`、`bench serve`，别的几项差别都在每次跑的波动以内（比如从头重建 1 万条 266 和 299 毫秒、取出 1 万条 75 和 69 毫秒）。CI 里的账号是超级用户，量不到行级安全的开销。
 

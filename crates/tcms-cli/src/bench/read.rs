@@ -1,5 +1,6 @@
 //! `tcms bench read`：造一个内容有变化的上下文仓库（中文词、英文词、数字，常见词出现得多），
-//! 索引进临时 schema，然后量：从 PostgreSQL 取出全部生效条目、建检索索引、编上下文包、检索。
+//! 索引进临时 schema，然后量：从 PostgreSQL 取出全部生效条目、建检索索引、编上下文包、检索，
+//! 和找一次晋升候选（审核页“可以晋升的”）。
 //! 编包和检索各跑若干次，报中位数和 p95。数据见 [`super::data`]。
 
 use std::process::ExitCode;
@@ -18,6 +19,8 @@ use super::{Percentiles, ms, percentiles, rss_kb, temp_schema};
 const PACK_P95_LIMIT: Duration = Duration::from_millis(20);
 /// 检索的 p95 门槛（1 万条）。
 const SEARCH_P95_LIMIT: Duration = Duration::from_millis(10);
+/// 找一次晋升候选的门槛（1 万条）。审核页打开“可以晋升的”时算一次，不在 agent 的热路径上。
+const CANDIDATES_LIMIT: Duration = Duration::from_millis(250);
 /// 判断复核日期用的“今天”，固定下来，每次结果一样。
 const TODAY: &str = "2026-11-23";
 
@@ -51,6 +54,12 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
         ms(SEARCH_P95_LIMIT)
     );
     println!(
+        "  找晋升候选               {:>8.1} 毫秒（{} 组）   门槛 {:.0} 毫秒",
+        ms(m.candidates),
+        m.groups,
+        ms(CANDIDATES_LIMIT)
+    );
+    println!(
         "  取条目和建索引多用的内存 {}（进程物理内存前后差）",
         m.memory
     );
@@ -68,6 +77,10 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
         eprintln!("检索超过门槛");
         failed = true;
     }
+    if m.candidates > CANDIDATES_LIMIT {
+        eprintln!("找晋升候选超过门槛");
+        failed = true;
+    }
     Ok(if check && failed {
         ExitCode::FAILURE
     } else {
@@ -80,6 +93,8 @@ struct Measured {
     build: Duration,
     pack: Percentiles,
     search: Percentiles,
+    candidates: Duration,
+    groups: usize,
     visible: f64,
     included: f64,
     listed: f64,
@@ -174,8 +189,17 @@ async fn measure(
         search_times.push(t.elapsed());
         std::hint::black_box(hits);
     }
+    let teams = match index.corpus().commit.as_deref() {
+        Some(c) => tcms_write::read_teams(repo, c).map_err(anyhow::Error::msg)?,
+        None => None,
+    };
+    let t = Instant::now();
+    let groups = tcms_write::promotion_candidates(index.corpus(), teams.as_ref()).len();
+    let candidates = t.elapsed();
     let n = requests as f64;
     Ok(Measured {
+        candidates,
+        groups,
         load,
         build,
         pack: percentiles(pack_times),

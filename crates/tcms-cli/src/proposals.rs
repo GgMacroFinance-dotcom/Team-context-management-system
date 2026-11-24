@@ -352,3 +352,33 @@ pub async fn reject(store: &Store, id: &str, note: Option<&str>) -> Result<()> {
     println!("已拒绝 {id}。");
     Ok(())
 }
+
+/// `tcms suggest-promotions`：系统找的晋升候选（`docs/spec.md` 第 5 节）。只列出来，不提议。
+pub async fn suggest_promotions(repo: &ContextRepo, store: &Store, json: bool) -> Result<()> {
+    let index = crate::read::load(store).await?;
+    let corpus = index.corpus();
+    let teams = match corpus.commit.as_deref() {
+        Some(c) => tcms_write::read_teams(repo, c).map_err(anyhow::Error::msg)?,
+        None => None,
+    };
+    let found = tcms_write::promotion_candidates(corpus, teams.as_ref());
+    if json {
+        println!("{}", serde_json::to_string_pretty(&found)?);
+        return Ok(());
+    }
+    if found.is_empty() {
+        println!("现在没有可以晋升的条目。");
+        return Ok(());
+    }
+    println!("{} 组可以晋升的条目（几个范围都写了相近的）：", found.len());
+    for c in &found {
+        println!();
+        println!("建议提到 {}（{}）：", c.to, c.kind);
+        for it in &c.items {
+            println!("  {}  {}  {}", it.id, it.scope, it.title);
+        }
+    }
+    println!();
+    println!("挑写得最好的一条：tcms promote <id> --to <范围> --reason \"...\"，批准以后才生效。");
+    Ok(())
+}

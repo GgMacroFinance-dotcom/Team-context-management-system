@@ -6,7 +6,7 @@
 
 ## 现在能做什么
 
-第 1 到 5 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）；MCP 服务端（`context_get`、`context_search`、`context_read`、`context_changes`、`context_propose`，stdio 和 Streamable HTTP，令牌定范围，查数据库的读由 PostgreSQL 的行级安全按令牌的范围再拦一道）；agent 的提议（检查、脱敏、找相近的条目、挡乱提）由人在审核页或命令行批准后写进 git；审核页还能看待复核的条目、按范围和类型浏览、改单条的纯文本，把岗位、团队的条目提到更大的范围（晋升，做成提议再批准）。配了 git 远端时，提交之前先拉、提交以后推上去，服务定时同步（`docs/spec.md` 6.5）。
+第 1 到 5 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）；MCP 服务端（`context_get`、`context_search`、`context_read`、`context_changes`、`context_propose`，stdio 和 Streamable HTTP，令牌定范围，查数据库的读由 PostgreSQL 的行级安全按令牌的范围再拦一道）；agent 的提议（检查、脱敏、找相近的条目、挡乱提）由人在审核页或命令行批准后写进 git；审核页还能看待复核的条目、按范围和类型浏览、改单条的纯文本，把岗位、团队的条目提到更大的范围（晋升，做成提议再批准），并列出系统找的晋升候选（几个岗位都写了的相近条目）。配了 git 远端时，提交之前先拉、提交以后推上去，服务定时同步（`docs/spec.md` 6.5）。
 
 ```sh
 cargo build --release
@@ -31,13 +31,14 @@ tcms accept prop_... --title "..." --body-file 改过的.md --note "..."   # 改
 tcms accept prop_... --over 3                                 # 条目在提议之后被人改过：看过第 3 版以后照样接受
 tcms reject prop_... --note "重复了"
 tcms promote ctx_... --to team:research --reason "数据岗位也要用"   # 晋升：做成一条提议，批准以后才生效
+tcms suggest-promotions                                       # 系统找的晋升候选：几个岗位（或团队、项目）都写了的相近条目
 tcms review-due --within 30                                   # 复核日期到了（和 30 天内到期）的条目
 tcms serve                                                    # MCP 服务端 http://127.0.0.1:7341/mcp（请求带 Authorization: Bearer <令牌>），审核页 http://127.0.0.1:7341/review
 tcms serve --listen 0.0.0.0:7341 --allowed-host ctx.example.com   # 对外提供时写上域名（默认只接受 Host 是本机的请求）
 TCMS_TOKEN=tcms_... tcms serve --stdio                        # 给同机、由 agent 启动的进程用
 TCMS_REMOTE=origin tcms sync                                  # 和远端同步一次：拉、更新索引、推（https 远端的令牌放在 TCMS_GIT_TOKEN）
 tcms bench index --check                                      # 索引基准
-tcms bench read --check                                       # 读的基准：编包、检索
+tcms bench read --check                                       # 读的基准：编包、检索、找晋升候选
 tcms bench serve --check                                      # 服务的基准：起 tcms serve --stdio 子进程，用 MCP 客户端量
 ```
 

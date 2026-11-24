@@ -26,15 +26,56 @@ pub struct Conflict {
     pub similarity: u32,
 }
 
-fn terms(text: &str) -> BTreeSet<String> {
+pub(crate) fn terms(text: &str) -> BTreeSet<String> {
     distinct_terms(text, MAX_QUERY_TERMS).into_iter().collect()
 }
 
-fn tag_set(tags: &[String]) -> BTreeSet<&str> {
+pub(crate) fn tag_set(tags: &[String]) -> BTreeSet<&str> {
     tags.iter()
         .map(String::as_str)
         .filter(|t| *t != "pinned")
         .collect()
+}
+
+/// 两条有多相近（0 到 100）：标题的词重合的比例（共有的词数 / 词少的那边的词数），
+/// 和标签的交集 / 并集，取大的。
+pub(crate) fn similarity(
+    a_terms: &BTreeSet<String>,
+    a_tags: &BTreeSet<&str>,
+    b_terms: &BTreeSet<String>,
+    b_tags: &BTreeSet<&str>,
+) -> u32 {
+    score(
+        a_terms.intersection(b_terms).count(),
+        a_terms.len(),
+        b_terms.len(),
+        a_tags.intersection(b_tags).count(),
+        a_tags.len(),
+        b_tags.len(),
+    )
+}
+
+/// [`similarity`] 的算法，用已经数好的共有词数、共有标签数算。
+pub(crate) fn score(
+    shared_terms: usize,
+    a_terms: usize,
+    b_terms: usize,
+    shared_tags: usize,
+    a_tags: usize,
+    b_tags: usize,
+) -> u32 {
+    let title_sim = (shared_terms * 100)
+        .checked_div(a_terms.min(b_terms))
+        .unwrap_or(0) as u32;
+    let tag_sim = (shared_tags * 100)
+        .checked_div(a_tags + b_tags - shared_tags)
+        .unwrap_or(0) as u32;
+    title_sim.max(tag_sim)
+}
+
+/// 到这个程度就算相近。
+pub(crate) fn similar(similarity: u32) -> bool {
+    similarity >= MIN_SIMILARITY
 }
 
 /// `exclude`：要改、要取代的那一条自己不算。
@@ -53,16 +94,8 @@ pub fn find_conflicts(
         .iter()
         .filter(|it| &it.scope == scope && it.kind == kind && Some(it.id.as_str()) != exclude)
         .filter_map(|it| {
-            let theirs = terms(&it.title);
-            let title_sim = (mine.intersection(&theirs).count() * 100)
-                .checked_div(mine.len().min(theirs.len()))
-                .unwrap_or(0) as u32;
-            let their_tags = tag_set(&it.tags);
-            let tag_sim = (my_tags.intersection(&their_tags).count() * 100)
-                .checked_div(my_tags.union(&their_tags).count())
-                .unwrap_or(0) as u32;
-            let similarity = title_sim.max(tag_sim);
-            (similarity >= MIN_SIMILARITY).then(|| Conflict {
+            let similarity = similarity(&mine, &my_tags, &terms(&it.title), &tag_set(&it.tags));
+            similar(similarity).then(|| Conflict {
                 id: it.id.clone(),
                 revision: it.revision,
                 scope: it.scope.to_string(),
