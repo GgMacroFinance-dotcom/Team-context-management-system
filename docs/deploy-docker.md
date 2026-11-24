@@ -40,9 +40,9 @@ docker build -t tcms .
 
 以下都在 `deploy/` 目录里执行。
 
-> 这份 compose 里 tcms 用 PostgreSQL 镜像建的账号 `tcms` 连，它是超级用户，数据库的行级安全对它不起作用，只剩服务本身按范围过滤，启动日志里会提醒一句。和 I.P. 一起部署时 tcms 用的是普通账号 `tcms_app`，起作用。
+数据库里有两个账号（2026-11-24 起）：PostgreSQL 镜像建的 `tcms` 是超级用户，只拿来管库、备份；tcms 服务用普通账号 `tcms_app` 连，它只拥有 schema `tcms`。超级用户不受数据库的行级安全管（`docs/architecture.md` 第 5 节），换成普通账号，agent 读条目、变更时数据库才会按令牌的范围再拦一道。空数据卷第一次启动时，`postgres-init/01-tcms-app.sh` 建这个账号和 schema。和 I.P. 一起部署时也是这样分的。
 
-1. **密钥**：复制 `env.example`，用 `openssl rand -hex 24` 生成 `POSTGRES_PASSWORD` 填进去。`.env` 已被 git 忽略。
+1. **密钥**：复制 `env.example`，用 `openssl rand -hex 24` 生成两个不一样的密码，填进 `POSTGRES_PASSWORD`（管理账号）和 `TCMS_DB_PASSWORD`（tcms 服务的账号）。`.env` 已被 git 忽略。
 
    ```bash
    cp env.example .env
@@ -156,6 +156,16 @@ sudo chown -R 10002:10002 ./context
 git pull && docker compose up -d --build
 ```
 
+**老的数据卷**（2026-11-24 以前建的，tcms 服务原来用超级用户 `tcms` 连，schema 里的表都归它）：升级以后先在 `.env` 里加上 `TCMS_DB_PASSWORD`，不加的话 `docker compose` 会报“在 .env 里设 TCMS_DB_PASSWORD”。初始化脚本只在空数据卷上自动执行，老的数据卷里没有 `tcms_app`，tcms 起不来，日志里是 `password authentication failed for user "tcms_app"`。手工执行一次同一个脚本，它建账号，把 schema 和里面的表、函数都交给 `tcms_app`，数据和令牌都不动，然后重启 tcms：
+
+```bash
+docker compose up -d
+docker compose exec postgres sh /docker-entrypoint-initdb.d/01-tcms-app.sh
+docker compose restart tcms
+```
+
+这个脚本可以重复执行。改了 `TCMS_DB_PASSWORD` 以后也执行一次，账号的密码跟着改。
+
 **备份**：
 
 - 数据库（提议、令牌、审计、索引）用 `pg_dump` 导：
@@ -190,6 +200,15 @@ git pull && docker compose up -d --build
 | 和 I.P. 一起部署（I.P. 仓库的 compose，`COMPOSE_PROFILES=tcms`） | 详见 I.P. 的 `docs/ip/deploy-docker.md`。这一步发现：`tcms_app` 没有在库里建 schema 的权限，旧代码的 `CREATE SCHEMA IF NOT EXISTS` 报 permission denied，tcms 起不来；改成先查再建，加了测试 |
 | 别的 `Host` | 审核页 403；`Host: tcms`（写进了 `TCMS_ALLOWED_HOSTS`）能连 |
 | `docker compose stop tcms` | 退出码 0，日志最后一行“已停止” |
+
+改用普通账号（2026-11-24，同一台机器）。镜像是在 `tcms:latest` 上换进本机编的 `tcms`（代码和 main 一样），没有从 `Dockerfile` 重新构建，这次没改 `Dockerfile`：
+
+| 测了什么 | 结果 |
+| --- | --- |
+| 空数据卷第一次启动 | 初始化脚本建了 `tcms_app`（不是超级用户、没有 `BYPASSRLS`）和归它的 schema `tcms`；两个服务都 `healthy`，tcms 的启动日志里没有“超级用户”的提醒；表都归 `tcms_app`，`items`、`item_versions`、`changes` 开了行级安全 |
+| 写上范围直接查 `items`（3 条，全公司、宏观岗位、法务岗位各 1 条） | 用 `tcms_app` 连，范围写全公司和宏观岗位时只出来 2 条；用超级用户 `tcms` 连，3 条都出来 |
+| 老的数据卷：先用原来的 compose（超级用户连）起，导入 2 条、发 1 个令牌，再换成新的 compose | tcms 起不来，日志里是 `password authentication failed for user "tcms_app"`；执行上面三条命令以后 `healthy`，没有提醒，8 张表、2 个序列和函数 `visible_scope` 都归 `tcms_app`，条目和令牌都在，行级安全照样起作用 |
+| 脚本再执行一次 | 只改了密码、授权和 schema 的属主，别的不动 |
 
 推到远端（2026-11-23，同一台机器，镜像 324 MB，多了 ssh 客户端）。远端是本机起的一个带 Basic 认证的 git 服务（`git http-backend` 外面包一层，只认一个用户名和令牌），不是真的 GitHub、Gitea：
 
