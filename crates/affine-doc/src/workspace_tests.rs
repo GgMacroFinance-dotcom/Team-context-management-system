@@ -85,7 +85,7 @@ fn doc_list_written_the_blocksuite_way_is_read() {
 #[test]
 fn table_rows_and_deletion_marker() {
     let t = Doc::new();
-    assert_eq!(table_doc_id(FOLDERS), "db$folders");
+    assert_eq!(table_doc_id("ws1", FOLDERS), "db$ws1$folders");
     upsert_row(&t, "r1", &[("id", "r1".into()), ("v", 1.0.into())]);
     upsert_row(&t, "r2", &[("id", "r2".into()), ("v", 2.0.into())]);
     assert_eq!(rows(&t).len(), 2);

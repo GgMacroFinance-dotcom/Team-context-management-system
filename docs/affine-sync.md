@@ -167,7 +167,7 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
   - 服务端推来的：别人改了加入了的文档（带改的人的用户 id；服务端可能把几段合成一段，还是普通的 Yjs 更新）；工作区里每有人推修改，所有加入了这个工作区的连接还都会收到一个“有文档变了”（带时间戳，包括没加入的、刚新建的文档），A3 用它发现人在 AFFiNE 里新建的文档。
   - 断线以后后台自己重连（1 秒起，每次翻倍，最多 30 秒），要的话重新登录，重新加入断之前加入了的文档，再告诉用的一方“又连上了”：断开的这段时间里的修改收不到广播，A3 要拿状态向量各取一次差量。断开的时候调用直接返回“断了”，不排队。
 - **协议版本 2**：服务端还有只在版本 2 能用的 `space:load-workspace-state`、`space:doc-lifecycle`（服务端自己记文档列表和回收站）。0.27.5-beta.3 的网页版没用（报的是 1），用版本 1 调它们会被拒，所以这里也不用。**文档列表和回收站照旧在工作区根文档的 `meta.pages` 里**：在网页版里把一篇文档移进回收站，根文档里那一项多了 `trash: true` 和 `trashDate`（2026-11-24 用无头浏览器试过）。
-- **文件夹**：不在 GraphQL 里，在工作区里一篇叫 `db$folders` 的 Yjs 文档里：根上每个以节点 id 为键的 Y.Map 是一行，字段 `id`、`parentId`、`data`（文件夹名或文档 id）、`type`（`folder`、`doc`、`tag`、`collection`）、`index`（排序键：fractional-indexing 的键加 `0` 再加 32 个随机字符），删掉的行带 `$$DELETED`。用同步协议取、推；读写这几张表和根文档 `meta.pages` 的代码在 `affine-doc` 的 `workspace` 里（AFFiNE 内核方案的 K1，`docs/affine-kernel-rust.md`），这里不重复写。
+- **文件夹**：不在 GraphQL 里，在工作区里一篇 id 是 `db$<工作区 id>$folders` 的 Yjs 文档里（只写 `db$folders` 服务端会拒绝，A3a 对真 AFFiNE 核对的）：根上每个以节点 id 为键的 Y.Map 是一行，字段 `id`、`parentId`、`data`（文件夹名或文档 id）、`type`（`folder`、`doc`、`tag`、`collection`）、`index`（排序键：fractional-indexing 的键加 `0` 再加 32 个随机字符），删掉的行带 `$$DELETED`。用同步协议取、推；读写这几张表和根文档 `meta.pages` 的代码在 `affine-doc` 的 `workspace` 里（AFFiNE 内核方案的 K1，`docs/affine-kernel-rust.md`），这里不重复写。
 - **GraphQL**：工作区（列出、新建）、最近改过的文档（`recentlyUpdatedDocs`）、评论（列出、发、标成已解决、删、按游标看变化）。评论的内容是一小篇 BlockSuite 文档的快照，`comment_content` 把几段纯文字做成这个样子，`comment_text` 反过来取文字。
 
 测试：
