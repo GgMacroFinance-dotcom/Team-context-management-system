@@ -1,0 +1,32 @@
+[package]
+name = "tcms-affine-client"
+description = "AFFiNE 的连接层：登录、socket.io 上的同步协议、GraphQL；不用 TCMS 自己的类型"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls-pki-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tcms-affine.workspace = true
+yrs.workspace = true
+serde_json.workspace = true
