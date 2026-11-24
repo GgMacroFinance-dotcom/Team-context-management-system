@@ -1,7 +1,7 @@
 # 单独部署团队上下文系统：一个 PostgreSQL 加 tcms。步骤见 docs/deploy-docker.md，简单说：
 #
 #   cd deploy
-#   cp env.example .env               # 填 POSTGRES_PASSWORD
+#   cp env.example .env               # 填 POSTGRES_PASSWORD、TCMS_DB_PASSWORD
 #   docker compose up -d --build
 #   docker compose run --rm tcms token add --name "某个 agent" --role macro
 #
@@ -14,8 +14,12 @@ services:
       POSTGRES_USER: tcms
       POSTGRES_DB: tcms
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设 POSTGRES_PASSWORD}
+      # tcms 服务用的普通账号 tcms_app 的密码。上面的 tcms 是超级用户，行级安全管不了它，只拿来管库、备份。
+      TCMS_DB_PASSWORD: ${TCMS_DB_PASSWORD:?在 .env 里设 TCMS_DB_PASSWORD}
     volumes:
       - pg-data:/var/lib/postgresql/data
+      # 空数据卷第一次启动时建 tcms_app 和 schema tcms。
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tcms -d tcms"]
       interval: 5s
@@ -29,7 +33,8 @@ services:
     restart: unless-stopped
     environment:
       # 密码用 openssl rand -hex 24 生成，只有十六进制字符，直接放进连接串不用转义。
-      TCMS_DATABASE_URL: postgres://tcms:${POSTGRES_PASSWORD}@postgres:5432/tcms
+      # 用普通账号 tcms_app 连，数据库的行级安全才起作用（docs/architecture.md 第 5 节）。
+      TCMS_DATABASE_URL: postgres://tcms_app:${TCMS_DB_PASSWORD}@postgres:5432/tcms
       # 从别的机器或容器用域名、IP 连时写上它们（逗号隔开）；默认只接受 Host 是本机的请求。
       TCMS_ALLOWED_HOSTS: ${TCMS_ALLOWED_HOSTS:-}
       TCMS_GIT_EMAIL: ${TCMS_GIT_EMAIL:-}
