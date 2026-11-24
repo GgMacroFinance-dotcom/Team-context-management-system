@@ -1,0 +1,18 @@
+[package]
+name = "tcms-affine"
+description = "和 AFFiNE 同步：用 yrs 读写 AFFiNE 的文档结构，Markdown 子集和块互相转换"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+comrak.workspace = true
+getrandom.workspace = true
+regex.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+yrs.workspace = true
