@@ -184,7 +184,8 @@ Edited-by: 王审核（tok_01JDX4...）
   | `changes` | 全局递增序号、条目 id、范围、版本号、提交、时间 |
   | `tokens` | 令牌 id（`tok_` 加 ULID）、种类（`agent` 或 `reviewer`）、名字、令牌的 SHA-256、岗位（只有 `agent` 有，约束保证）、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。两种令牌互不通用：核对 MCP 的令牌只认 `agent`，审核页只认 `reviewer` |
   | `item_uses` | 条目被 agent 用了几次：条目 id、日期（UTC）、岗位、次数，一天一个岗位一行（2026-11-24，迁移 `0006_item_uses.sql`）。找用得多的晋升候选用（第 3 节），只留 90 天 |
-  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝，第 5 步加人在审核页改单条（`item.edit`） |
+  | `affine_scopes`、`affine_docs`、`affine_items`、`affine_conflicts` | 和 AFFiNE 同步（2026-11-24，迁移 `0007_affine.sql`，`affine-sync.md` 5.1）：接上的范围对应的工作区和文件夹，文件对应的文档和上次同步完的 Yjs 状态，条目对应的标题块和底稿，两边都改了等人处理的。只有 `tcms affine` 用 |
+  | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝，第 5 步加人在审核页改单条（`item.edit`），和 AFFiNE 同步时加 `affine.link`、`affine.sync` |
 
 - **行级安全**（2026-11-24 做了，迁移 `0005_row_security.sql`）：agent 经 MCP 查数据库的读（`context_read` 读现在这一版和旧版本，`context_changes` 查变更）都在一个只读、可重复读的事务里，开头用 `set_config(..., true)` 写上令牌能看的范围：`tcms.scopes` 是数组写法（比如 `{org,team:research,role:macro,project:q4}`），`tcms.all_projects` 是 `on` 或 `off`（令牌的项目是 `*` 时为 `on`）。只在这个事务里有效，连接放回池子以后不带到下一次。`items`、`item_versions`（按快照里那个版本当时的范围）、`changes` 上各有一条策略 `reach`，调函数 `visible_scope(scope)`：写了 `tcms.scopes` 就只放行这些范围（空数组什么都看不到），没写就不拦。没写的是服务自己的读写：建索引、取条目建检索索引、审核页、命令行，这些要看全部。
   - 是兜底：服务本身照样过滤。`context_changes` 的 SQL 里带范围条件；`context_read` 在 Rust 里再查一遍现在这一版和要的那个版本的范围，两个都要看得到（现在看不到的条目，旧版本当时看得到也不给）。`context_changes` 的 cursor 在写上范围之前取，是全部变更里最大的序号，和账号受不受行级安全管无关；变更带的标题是条目现在的标题，条目现在的范围看不到时不带。
@@ -241,7 +242,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 ## 8. 以后和 AFFiNE 同步
 
-方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写（`crates/affine-doc`，第一步 A1 2026-11-24 已做，同一天从 `crates/tcms-affine` 搬过去）；连 AFFiNE 的登录、同步协议、GraphQL 在 `crates/affine-sync-client`（第二步 A2 2026-11-24 已做，不用 TCMS 自己的类型；同一天从 `tcms-affine-client` 改名搬进 AFFiNE 内核）；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
+方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写（`crates/affine-doc`，第一步 A1 2026-11-24 已做，同一天从 `crates/tcms-affine` 搬过去）；连 AFFiNE 的登录、同步协议、GraphQL 在 `crates/affine-sync-client`（第二步 A2 2026-11-24 已做，不用 TCMS 自己的类型；同一天从 `tcms-affine-client` 改名搬进 AFFiNE 内核）；接上和同步一次在 `crates/tcms-affine`（第三步的前一半 A3a 2026-11-24 已做：三方比较、`tcms affine` 命令，对应关系和底稿存在 PostgreSQL 的 `affine_scopes`、`affine_docs`、`affine_items`、`affine_conflicts` 四张表里，迁移 `0007_affine.sql`）；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
 
 ## 9. 依赖
 
@@ -266,11 +267,11 @@ Edited-by: 王审核（tok_01JDX4...）
 | 命令行 | clap 4 | MIT 或 Apache-2.0 |
 | 内存分配器 | tikv-jemallocator 0.7（带着 jemalloc 5.3 的源码，构建时用 C 编译器和 make 编；开后台线程；MSVC 上不用，用系统自带的） | MIT 或 Apache-2.0；jemalloc 本身是 BSD-2-Clause |
 | 测试审核页的接口（只在测试里） | tower 0.5（util）、http-body-util 0.1 | MIT |
-| 和 AFFiNE 同步：Yjs 文档 | yrs 0.28（不开默认特性，开 `small-client`：客户端 id 32 位，和 AFFiNE 用的 yjs 13.6 一样） | MIT |
+| 和 AFFiNE 同步：Yjs 文档 | yrs 0.28（不开默认特性；客户端 id 用默认的 53 位，AFFiNE 0.27.5 网页版的客户端 id 超过 32 位，不能开 `small-client`） | MIT |
 | 和 AFFiNE 的连接（`crates/affine-sync-client`）：WebSocket 和自己写的 socket.io 那一层 | tokio-tungstenite 0.29（不开默认特性，只要握手；带进来 tungstenite） | MIT（tungstenite 是 MIT 或 Apache-2.0） |
 | 和 AFFiNE 的连接：TLS、HTTP | tokio-rustls 0.26（ring，不用 aws-lc-rs）、webpki-roots 1、rustls-pki-types 1；hyper 1（只开客户端、http1）、hyper-util、http-body-util；base64 0.22 | MIT 或 Apache-2.0；webpki-roots 是 CDLA-Permissive-2.0 |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），和 AFFiNE 同步第一步 A1 以后 443 个（多了 yrs 和它带进来的 async-lock、event-listener-strategy、smallstr，加上 tcms-affine），把 A1 搬进 affine-doc 以后 444 个（只多了 affine-doc 自己），A2 以后 454 个（多了 tokio-tungstenite、tungstenite 和它带进来的 sha1、digest、block-buffer、crypto-common、cpufeatures（0.2）、data-encoding，tokio-rustls，加上 tcms-affine-client，后来改名 affine-sync-client，个数不变），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），和 AFFiNE 同步第一步 A1 以后 443 个（多了 yrs 和它带进来的 async-lock、event-listener-strategy、smallstr，加上 tcms-affine），把 A1 搬进 affine-doc 以后 444 个（只多了 affine-doc 自己），A2 以后 454 个（多了 tokio-tungstenite、tungstenite 和它带进来的 sha1、digest、block-buffer、crypto-common、cpufeatures（0.2）、data-encoding，tokio-rustls，加上 tcms-affine-client，后来改名 affine-sync-client，个数不变；A3a 没有新的依赖，还是 454 个），都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 

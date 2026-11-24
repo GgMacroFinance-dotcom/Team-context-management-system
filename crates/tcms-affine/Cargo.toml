@@ -1,6 +1,6 @@
 [package]
 name = "tcms-affine"
-description = "和 AFFiNE 同步：本系统这一侧。文档结构的读写在 affine-doc 里"
+description = "和 AFFiNE 同步：本系统这一侧（对应表、三方比较、同步一次）。文档结构的读写在 affine-doc 里，连接在 affine-sync-client 里"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,18 @@ workspace = true
 
 [dependencies]
 affine-doc.workspace = true
+affine-sync-client.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tcms-core.workspace = true
+tcms-git.workspace = true
+tcms-store.workspace = true
+tcms-write.workspace = true
+thiserror.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+tcms-index.workspace = true

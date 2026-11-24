@@ -14,10 +14,12 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+affine-sync-client.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 serde_json.workspace = true
+tcms-affine.workspace = true
 tcms-core.workspace = true
 tcms-git.workspace = true
 tcms-index.workspace = true

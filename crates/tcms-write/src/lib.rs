@@ -11,8 +11,10 @@
 //! - [`sync`]：和上下文仓库的远端同步（拉、索引、推）。批准和改单条配了远端时也会先拉、后推。
 //!   拉下来的新条目没有 id 时补上（[`assign_since`]）。
 //! - [`assign_all`]：`tcms assign-ids`，给整个仓库里没有 id 的条目补 id。
+//! - [`begin_batch`]：在提交队列里连着做几个提交（和 AFFiNE 同步用）。
 
 mod accept;
+mod batch;
 mod candidates;
 mod conflicts;
 mod edit_item;
@@ -23,6 +25,7 @@ mod review;
 mod sync;
 
 pub use accept::{AcceptOptions, Accepted, WriteError, accept, default_path, reject};
+pub use batch::{Batch, begin_batch};
 pub use candidates::{
     CandidateItem, MIN_USE_DAYS, MIN_USES, PromotionCandidate, USE_WINDOW_DAYS, UsedCandidate,
     promotion_candidates, used_candidates,

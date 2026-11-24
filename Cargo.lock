@@ -3756,16 +3756,31 @@ name = "tcms-affine"
 version = "0.1.0"
 dependencies = [
  "affine-doc",
+ "affine-sync-client",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tcms-core",
+ "tcms-git",
+ "tcms-index",
+ "tcms-store",
+ "tcms-write",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "yrs",
 ]
 
 [[package]]
 name = "tcms-cli"
 version = "0.1.0"
 dependencies = [
+ "affine-sync-client",
  "anyhow",
  "clap",
  "rmcp",
  "serde_json",
+ "tcms-affine",
  "tcms-core",
  "tcms-git",
  "tcms-index",

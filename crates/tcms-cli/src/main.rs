@@ -1,5 +1,6 @@
 //! 命令行 `tcms`（`docs/spec.md` 6.2）。现在有上下文仓库、索引、读（`get`、`search`）、处理提议、令牌和 MCP 服务端的命令。
 
+mod affine;
 mod bench;
 mod import;
 mod proposals;
@@ -200,6 +201,11 @@ enum Command {
         /// 用 JSON 输出。
         #[arg(long)]
         json: bool,
+    },
+    /// 和 AFFiNE 同步：建工作区、接上范围、同步一次、看状态、处理两边都改了的。
+    Affine {
+        #[command(subcommand)]
+        what: affine::AffineCmd,
     },
     /// 发、列、吊销令牌（给 agent 的，和给审核的人的）。
     Token {
@@ -463,6 +469,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 );
             }
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Affine { what } => {
+            affine::run(&cli.repo, &cli.schema, remote.as_ref(), what).await
         }
         Command::Token { what } => {
             let store = connect(&cli.schema).await?;
