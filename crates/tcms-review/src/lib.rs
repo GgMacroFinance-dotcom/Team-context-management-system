@@ -4,10 +4,12 @@
 //! - `/api/...`：网页用的 JSON 接口，每个请求带 `Authorization: Bearer <审核的人的令牌>`。agent 的令牌在这里不认，
 //!   审核的人的令牌在 `/mcp` 也不认，agent 批准不了自己的提议。
 //! - 批准、改单条要写 git：放在一个专门的线程里排队做（[`Writer`]），和命令行的 `tcms accept` 排在同一个提交队列里。
+//! - `/hooks/push`：远端推送的 webhook（[`push_hook`]，配了 `TCMS_WEBHOOK_SECRET` 和远端时才有），签名对了马上同步一次。
 //!
 //! 第一版审核的人能看、能处理所有范围。
 
 mod api;
+mod hooks;
 mod writer;
 
 use std::sync::Arc;
@@ -20,6 +22,7 @@ use axum::routing::{get, post};
 use http::{HeaderValue, StatusCode, header};
 use tcms_mcp::{Live, bearer};
 
+pub use hooks::{MIN_SECRET_LEN, push_hook};
 pub use writer::{Contact, RemoteStatus, Writer};
 
 #[derive(Debug, thiserror::Error)]

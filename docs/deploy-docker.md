@@ -34,7 +34,8 @@ docker build -t tcms .
 | `TCMS_REMOTE_BRANCH` | 远端的分支，默认和本地同名（新卷是 `main`） |
 | `TCMS_GIT_TOKEN` | https 远端的令牌。只放在这里，不要写进地址 |
 | `TCMS_GIT_USERNAME` | 和令牌一起用的用户名，默认 `x-access-token`（GitHub）；Gitea、GitLab 写自己的用户名 |
-| `TCMS_SYNC_SECS` | 多久和远端同步一次，默认 60 秒；0 是只在批准、改单条时同步 |
+| `TCMS_SYNC_SECS` | 多久和远端同步一次，默认 60 秒；0 是只在批准、改单条（和收到推送通知）时同步 |
+| `TCMS_WEBHOOK_SECRET` | 可选，远端推送通知（webhook）的密钥，至少 16 个字符。配了以后人推上去马上同步，见“推上去马上同步” |
 
 ## 单独部署
 
@@ -105,7 +106,7 @@ sudo chown -R 10002:10002 ./context
 
 ## 推到自己的 git 远端
 
-配了远端以后，批准、审核页改单条、导入、补 id 都是提交之前先拉、提交以后推；服务每 60 秒再同步一次，人推到远端的改动就这样进来、进索引。规则见 `spec.md` 6.5。
+配了远端以后，批准、审核页改单条、导入、补 id 都是提交之前先拉、提交以后推；服务每 60 秒再同步一次，人推到远端的改动就这样进来、进索引。配了推送通知时推上去马上同步（下面“推上去马上同步”）。规则见 `spec.md` 6.5。
 
 1. 在 GitHub、Gitea 上建一个仓库，空的或者已经放了上下文都行。
 2. 发一个只对这个仓库有读写权限的令牌：GitHub 用 fine-grained token，权限给 Contents 读写；Gitea 用 Access Token，给 repository 读写。在 `.env` 里写：
@@ -133,6 +134,20 @@ sudo chown -R 10002:10002 ./context
    ```
 
    审核页顶上也有一行，写着上次同步是几分钟前、正常没有；出错、合并不了时换颜色，写明原因和怎么合并。
+
+### 推上去马上同步
+
+不配的话，人推上去的改动最多等一个同步间隔（默认 60 秒）才进来。配了推送通知（webhook）以后，远端收到推送就通知 tcms，约一秒内进索引。
+
+1. 生成密钥写进 `.env`：`TCMS_WEBHOOK_SECRET=$(openssl rand -hex 32)`，重新起 tcms。日志里那一行变成“远端 …：收到推送（POST /hooks/push）马上同步，每 60 秒同步一次”。
+2. 远端要连得到 tcms：通知发到 `https://<域名>/hooks/push`。tcms 放在 HTTPS 反向代理后面时，可以只把 `/hooks/push` 放出去；这个地址靠签名认人，不查 `Host`，也不回任何数据。
+3. 在仓库的设置里加 webhook：
+   - GitHub：Settings → Webhooks → Add webhook。Payload URL 填上面的地址，Content type 选 `application/json`，Secret 填 `TCMS_WEBHOOK_SECRET`，事件选 Just the push event。保存后 GitHub 发一个 ping，tcms 回 200。
+   - Gitea、Forgejo：仓库设置 → Web 钩子 → 添加 Gitea 钩子。目标 URL 填上面的地址，HTTP 方法 POST，内容类型 `application/json`，密钥填 `TCMS_WEBHOOK_SECRET`，触发条件选推送事件。
+   - GitLab：Settings → Webhooks。URL 填上面的地址，Secret token 填 `TCMS_WEBHOOK_SECRET`，勾 Push events。
+4. 推一次试试：日志里有“收到远端推送，远端 …：拉：快进到 …”，审核页顶上写“收到推送后同步”。签名不对时远端那边看到 401（GitHub 在 Recent Deliveries 里），tcms 什么都不做。
+
+定时同步可以留着当兜底（通知丢了、tcms 重启时错过的推送），间隔可以调长，比如 `TCMS_SYNC_SECS=600`。
 
 **人怎么改**：克隆远端，改 Markdown，提交，推到 `main`。最多等一个同步间隔，服务拉下来、更新索引，运行中的检索索引跟着换。新写的标题不用自己写 id：服务拉下来时补上，做成一个“补 id：远端新来的 N 条”的提交推回去，日志里也有一行。接着改之前先 `git pull`，拿到这些 id。
 
