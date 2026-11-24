@@ -34,7 +34,7 @@ pub use sqlx::postgres::PgListener;
 
 pub use proposals::{Action, CommitLock, Decision, NewProposal, ProposalRow, Proposed};
 pub use tokens::{
-    ALL_PROJECTS, Identity, NewToken, Reviewer, TOKEN_PREFIX, TokenRow, VisibleChange,
+    ALL_PROJECTS, Identity, ItemRead, NewToken, Reviewer, TOKEN_PREFIX, TokenRow, VisibleChange,
     VisibleChanges, hash_token,
 };
 
@@ -48,6 +48,8 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("schema 名不对：{0}（只能是小写字母、数字、下划线，字母或下划线开头）")]
     BadSchema(String),
+    #[error("旧版本的快照读不出来：{0}")]
+    Snapshot(#[from] serde_json::Error),
     #[error("生成随机数失败：{0}")]
     Random(String),
     #[error("索引期间有别的进程先更新了索引（原来在 {expected:?}，现在在 {found:?}），请重试")]

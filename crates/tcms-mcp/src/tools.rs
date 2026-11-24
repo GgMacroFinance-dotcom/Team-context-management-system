@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tcms_core::{Kind, Scope, utc_today, valid_name};
 use tcms_pack::{Request, compile};
 use tcms_search::{SearchOptions, Visibility};
-use tcms_store::{Identity, ItemRow};
+use tcms_store::{Identity, ItemRead};
 use tcms_write::{ProposeArgs, ProposeError, reach};
 
 use crate::Live;
@@ -309,25 +309,23 @@ struct ReadArgs {
 
 async fn read(live: &Live, who: &Identity, a: ReadArgs) -> Outcome {
     let missing = || format!("没有这一条：{}", a.id);
-    let store = live.store();
-    let Some(current) = store.get_item(&a.id).await.map_err(internal)? else {
+    // 数据库按令牌的范围拦一道（行级安全），这里再查一遍：现在这一版和要的那个版本当时所在的范围都要看得到。
+    // 看不到和不存在回答一样。
+    let found = live
+        .store()
+        .read_as(who, &a.id, a.revision)
+        .await
+        .map_err(internal)?;
+    let Some(ItemRead {
+        current,
+        version: Some(version),
+    }) = found
+    else {
         return Err(missing());
     };
-    let version: ItemRow = match a.revision {
-        None => current.clone(),
-        Some(r) if r == current.revision => current.clone(),
-        Some(r) => match store.version_snapshot(&a.id, r).await.map_err(internal)? {
-            Some(snapshot) => serde_json::from_value(snapshot).map_err(internal)?,
-            None => return Err(missing()),
-        },
-    };
-    // 看那个版本当时所在的范围。看不到和不存在回答一样。
     let visibility = reach(who);
-    let visible = version
-        .scope
-        .parse::<Scope>()
-        .is_ok_and(|s| visibility.allows(&s));
-    if !visible {
+    let visible = |scope: &str| scope.parse::<Scope>().is_ok_and(|s| visibility.allows(&s));
+    if !visible(&current.scope) || !visible(&version.scope) {
         return Err(missing());
     }
     // 被哪条取代了（只说调用者看得到的）。
@@ -372,12 +370,7 @@ async fn changes(live: &Live, who: &Identity, a: ChangesArgs) -> Outcome {
     let limit = a.limit.unwrap_or(DEFAULT_CHANGES).clamp(1, MAX_CHANGES);
     let out = live
         .store()
-        .visible_changes(
-            a.since_cursor,
-            &who.scope_strings(),
-            who.all_projects(),
-            limit,
-        )
+        .visible_changes(who, a.since_cursor, limit)
         .await
         .map_err(internal)?;
     serde_json::to_value(&out).map_err(internal)

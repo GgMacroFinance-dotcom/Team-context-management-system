@@ -154,7 +154,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 **`context_get`**（`crates/tcms-pack`）：
 
-1. 在内存里按调用者可见的范围过滤（数据库行级安全再拦一道，见第 5 节，还没做）。
+1. 在内存里按调用者可见的范围过滤。这一步不查数据库，行级安全（第 5 节）管不到，靠这里的过滤和测试。
 2. 固定前缀照 `spec.md` 4.2 拼。
 3. 剩下的用 tantivy 按任务描述打分，同分按地位、更新时间、id 排，装到预算为止，装不下的进目录。
 4. 输出里带 `cursor`（取条目时的 `changes` 序号）。
@@ -181,7 +181,11 @@ Edited-by: 王审核（tok_01JDX4...）
   | `usage` | 每条被放进上下文包、被 `read` 的次数，按岗位记 |
   | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝，第 5 步加人在审核页改单条（`item.edit`） |
 
-- **行级安全**（还没做）：服务在每个事务开头写 `SET LOCAL tcms.scopes = '{org,team:research,role:macro}'`，`items`、`changes` 上的策略只放行这些范围。服务本身也过滤，这一层是兜底。第 3 步服务读 `items`、`item_versions`、`changes` 时只在代码里过滤（`context_read`、`context_changes` 按令牌的范围，测试里核对了越权读和不存在回答一样）。
+- **行级安全**（2026-11-24 做了，迁移 `0005_row_security.sql`）：agent 经 MCP 查数据库的读（`context_read` 读现在这一版和旧版本，`context_changes` 查变更）都在一个只读、可重复读的事务里，开头用 `set_config(..., true)` 写上令牌能看的范围：`tcms.scopes` 是数组写法（比如 `{org,team:research,role:macro,project:q4}`），`tcms.all_projects` 是 `on` 或 `off`（令牌的项目是 `*` 时为 `on`）。只在这个事务里有效，连接放回池子以后不带到下一次。`items`、`item_versions`（按快照里那个版本当时的范围）、`changes` 上各有一条策略 `reach`，调函数 `visible_scope(scope)`：写了 `tcms.scopes` 就只放行这些范围（空数组什么都看不到），没写就不拦。没写的是服务自己的读写：建索引、取条目建检索索引、审核页、命令行，这些要看全部。
+  - 是兜底：服务本身照样过滤。`context_changes` 的 SQL 里带范围条件；`context_read` 在 Rust 里再查一遍现在这一版和要的那个版本的范围，两个都要看得到（现在看不到的条目，旧版本当时看得到也不给）。`context_changes` 的 cursor 在写上范围之前取，是全部变更里最大的序号，和账号受不受行级安全管无关；变更带的标题是条目现在的标题，条目现在的范围看不到时不带。
+  - 表的主人（服务的账号）也要受管，所以三张表都 `FORCE ROW LEVEL SECURITY`。超级用户和带 `BYPASSRLS` 的账号不受行级安全管，`tcms serve` 启动时查到会提醒一句，只剩服务本身的过滤。I.P. 的打包服务器上 `tcms_app` 是普通账号，拥有 schema `tcms`，起作用；本仓库单独部署的 `deploy/docker-compose.yml` 用的是 PostgreSQL 镜像建的超级用户，不起作用（见 `docs/deploy-docker.md`）。Supabase 的 `postgres` 账号带 `BYPASSRLS`，要起作用得另建普通账号。
+  - 管不到的：`context_get`、`context_search` 在服务内存里的那一份条目上过滤，不查数据库（上面第 4 节）；`context_propose` 找矛盾也用内存里的那一份；提议、令牌、用量、审计这几张表没加策略（agent 读不到这些表的内容，只写自己的提议）。
+  - 测试（`crates/tcms-store/tests/row_security.rs`）建一个普通账号，只拥有自己的 schema，像部署时一样连：store 这里读单条不写范围条件，越权的是数据库拦下的；直接写不带条件的 SQL，写上范围以后三张表都只出来这些范围的行，同一个连接的下一个事务不受影响；写上范围以后看不到的行也改不了。整套测试用普通账号也跑过（本地）。CI 用的是超级用户，其他测试里行级安全不起作用，测的是服务自己的过滤。
 - **迁移**：sqlx 的迁移文件（`crates/tcms-store/migrations/`），连接时自动跑。第一版用运行时查询（`sqlx::query`），每条 SQL 都由连真 PostgreSQL 的集成测试覆盖；以后表多了再考虑换成编译期检查的 `query!` 宏。批量写入用 `UNNEST`，一条语句写一批。
 - **索引锁**：每次索引在一个事务里，开头拿 `pg_advisory_xact_lock`（键按 schema 名算），并确认库里记的索引提交没被别的进程改过，改过就重来一次。
 - **兼容 Supabase**：只用标准 PostgreSQL，客户把 `DATABASE_URL` 指向 Supabase 就能跑，Supabase Studio 能直接看 `tcms` 的表。不依赖 Supabase 的鉴权、PostgREST、Realtime、Storage。
@@ -279,6 +283,8 @@ Edited-by: 王审核（tok_01JDX4...）
 | 只读 git 和解析 1 万条目 | 不设 | 30 毫秒 |
 | `context_get` 经过 stdio 一次往返（`tcms serve --stdio` 子进程，含核对令牌） | p95 < 30 毫秒 | 中位数 8.0 毫秒，p95 10.0 毫秒 |
 | `context_search` 经过 stdio 一次往返 | p95 < 15 毫秒 | 中位数 0.9 毫秒，p95 1.6 毫秒 |
+| `context_read` 经过 stdio 一次往返（带令牌范围的只读事务里查 PostgreSQL） | p95 < 15 毫秒 | 普通账号（行级安全起作用）中位数 0.7 毫秒，p95 0.9 毫秒；超级用户中位数 0.9 毫秒，p95 1.1 毫秒（2026-11-24） |
+| `context_changes` 经过 stdio 一次往返（同上，从随机序号往后，默认最多 200 条） | p95 < 15 毫秒 | 普通账号中位数 2.1 毫秒，p95 2.5 毫秒；超级用户中位数 2.0 毫秒，p95 2.5 毫秒（2026-11-24） |
 | 核对一次令牌（查 PostgreSQL） | p95 < 5 毫秒 | 中位数 0.13 毫秒，p95 0.17 毫秒 |
 | `context_propose` 经过 stdio 一次往返（检查、找矛盾、写进 PostgreSQL） | p95 < 15 毫秒 | 中位数 1.4 毫秒，p95 2.1 毫秒 |
 | 批准一条（排队、索引带到 HEAD、改文件、提交、增量索引；1 万条） | p95 < 250 毫秒 | 中位数 30 毫秒，p95 35 毫秒 |
@@ -289,6 +295,8 @@ Edited-by: 王审核（tok_01JDX4...）
 | 空闲时内存（1 万条，换过 5 次索引以后不发请求，等 20 秒以上、稳下来） | < 50 MB | 约 40 到 41 MB（原来用 glibc 时约 86 MB，等多久都不降）；1000 条约 27 MB（glibc 约 43 MB） |
 
 `tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项，`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
+
+加行级安全时（2026-11-24）用普通账号和超级用户各跑了一遍 `bench index`、`bench read`、`bench serve`，别的几项差别都在每次跑的波动以内（比如从头重建 1 万条 266 和 299 毫秒、取出 1 万条 75 和 69 毫秒）。CI 里的账号是超级用户，量不到行级安全的开销。
 
 审核页（第 5 步）没有加新的基准：它的接口是人点一下调一次，不在热路径上；接受、改单条和 `tcms accept` 走同一个提交队列，批准的耗时已经在 `bench serve` 里量了。
 

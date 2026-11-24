@@ -405,6 +405,44 @@ async fn follows_reindex_through_notify() {
     f.store.drop_schema().await.unwrap();
 }
 
+/// 条目换了范围以后读旧版本：现在这一版和要的那个版本都要看得到。
+/// 测试的账号是超级用户时行级安全不起作用，这里看的是服务自己的那一道。
+#[tokio::test]
+async fn read_old_revision_after_scope_moves() {
+    let Some(f) = fixture().await else { return };
+    // RULE 从全公司挪到数据岗位，DATA 从数据岗位挪到全公司。
+    f.repo
+        .commit(
+            &[
+                put("org/规矩.md", &format!("## 数据岗位的周报口径\n<!-- ctx id={DATA} kind=fact -->\n现在全公司都看得到。\n")),
+                put("role-data/口径.md", &format!("## 数字要有来源\n<!-- ctx id={RULE} kind=rule -->\n只给数据岗位了。\n")),
+            ],
+            "挪范围",
+            &Author::default(),
+        )
+        .unwrap();
+    tcms_index::reindex(&f.repo, &f.store, false).await.unwrap();
+    let client = connect_stream(&f.live, &f.macro_token).await;
+    // 现在看不到：第 1 版当时在全公司也不给。
+    for revision in [None, Some(1), Some(2)] {
+        let r = call(
+            &client,
+            "context_read",
+            json!({"id": RULE, "revision": revision}),
+        )
+        .await;
+        assert_eq!(err_text(&r), format!("没有这一条：{RULE}"));
+    }
+    // 现在看得到，第 1 版当时在数据岗位：只给现在的。
+    let r = call(&client, "context_read", json!({"id": DATA})).await;
+    assert_eq!(ok(&r)["scope"], "org");
+    assert_eq!(ok(&r)["revision"], 2);
+    let r = call(&client, "context_read", json!({"id": DATA, "revision": 1})).await;
+    assert_eq!(err_text(&r), format!("没有这一条：{DATA}"));
+    client.cancel().await.unwrap();
+    f.store.drop_schema().await.unwrap();
+}
+
 /// agent 提议 → 批准以前不生效 → 人批准、写进 git → 服务换上新索引以后 agent 看得到。
 #[tokio::test]
 async fn propose_then_accept() {

@@ -6,7 +6,7 @@
 
 ## 现在能做什么
 
-第 1 到 5 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）；MCP 服务端（`context_get`、`context_search`、`context_read`、`context_changes`、`context_propose`，stdio 和 Streamable HTTP，令牌定范围）；agent 的提议（检查、脱敏、找相近的条目、挡乱提）由人在审核页或命令行批准后写进 git；审核页还能看待复核的条目、按范围和类型浏览、改单条的纯文本，把岗位、团队的条目提到更大的范围（晋升，做成提议再批准）。配了 git 远端时，提交之前先拉、提交以后推上去，服务定时同步（`docs/spec.md` 6.5）。
+第 1 到 5 步（`docs/spec.md` 第 11 节）：上下文仓库（git 里的 Markdown）同步进 PostgreSQL 的条目索引；按岗位和任务编上下文包、全文检索（中文按相邻两字切分）；MCP 服务端（`context_get`、`context_search`、`context_read`、`context_changes`、`context_propose`，stdio 和 Streamable HTTP，令牌定范围，查数据库的读由 PostgreSQL 的行级安全按令牌的范围再拦一道）；agent 的提议（检查、脱敏、找相近的条目、挡乱提）由人在审核页或命令行批准后写进 git；审核页还能看待复核的条目、按范围和类型浏览、改单条的纯文本，把岗位、团队的条目提到更大的范围（晋升，做成提议再批准）。配了 git 远端时，提交之前先拉、提交以后推上去，服务定时同步（`docs/spec.md` 6.5）。
 
 ```sh
 cargo build --release
