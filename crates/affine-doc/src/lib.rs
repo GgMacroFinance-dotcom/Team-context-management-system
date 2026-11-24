@@ -8,11 +8,13 @@
 //! - [`doc`]：一篇文档（块树）的读写；
 //! - [`markdown`]：Markdown 子集和块互相转换；
 //! - [`sections`]：按二级标题块切成一条一条；
+//! - [`bundle`]：AFFiNE 导出的工作区包（`.bs.zip`：快照加附件）的读写，整包导出、导入；
 //! - [`snapshot`]：BlockSuite 的文档快照（`.snapshot.json`）和 Yjs 文档互相转换；
 //! - [`workspace`]：根文档里的文档列表、文件夹树、文档属性这几张表；
 //! - [`schema`]：全部块的种类、版本、能放在哪里；不挑块的读法和结构检查；
 //! - [`order`]：AFFiNE 列表用的排序键。
 
+pub mod bundle;
 pub mod doc;
 pub mod markdown;
 pub mod model;
@@ -29,6 +31,8 @@ pub use markdown::{roundtrips, same_content, to_blocks, to_markdown};
 pub use model::{Block, Content, ListKind, Marks, ParagraphKind, Span, plain_text};
 pub use sections::{Item, Section, split};
 
+#[cfg(test)]
+mod bundle_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]

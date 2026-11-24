@@ -228,7 +228,7 @@ fn interop_with_affine_snapshot() {
     }
 }
 
-fn diff(path: &str, a: &Value, b: &Value) {
+pub(crate) fn diff(path: &str, a: &Value, b: &Value) {
     match (a, b) {
         (Value::Object(x), Value::Object(y)) => {
             for k in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
