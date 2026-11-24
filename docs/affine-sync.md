@@ -134,7 +134,7 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 
 ### 7.1 A1 做了什么（2026-11-24）
 
-代码在 `crates/tcms-affine`，只是一个库：不连网络、不碰上下文仓库和数据库，A3 的同步循环才用它。
+代码原来在 `crates/tcms-affine`，2026-11-24 搬进了不依赖本系统的 `crates/affine-doc`（`affine-kernel-rust.md` 的 K1），`tcms-affine` 原样转出。它只是一个库：不连网络、不碰上下文仓库和数据库，A3 的同步循环才用它。
 
 - 读（`read`）：从页面块往下走，把不是只在白板里显示的 note（`prop:displayMode` 不是 `edgeless`）里的块接起来。认得的块是段落（正文、h1–h6、引用）、列表（圆点、编号、待办）、代码、分隔线；行内格式认粗体、斜体、删除线、行内代码、链接。别的块（图片、表格、数据库、嵌入……）变成“不转换的块”，在 Markdown 里写成一行占位注释 `<!-- affine block=<id> flavour=<flavour> 这一块只在 AFFiNE 里，没有同步 -->`。AFFiNE 有、Markdown 写不出来的东西（下划线、颜色这类别的格式，行内嵌入，段落下面的子块，折叠列表）照样读出文字，但这一块标成“转换有损失”。
 - 切条目（`split`）：二级标题开始一条，到下一个一级或二级标题为止；第一个二级标题前面的和一级标题不算条目。每一条带着它那个二级标题块的 id（和上下文仓库里条目 id 的对应表 `affine_items` 在 A3 做）。
@@ -142,14 +142,14 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 - 写（`create`、`set_title`、`update_item`、`insert_item`、`remove_item`）：新文档写成页面块、白板块、一个 note，块的 `sys:version` 和 0.27.5 一样，只写必要的属性（别的由 BlockSuite 加载时补默认值）。改一条时标题块的 id 不变，正文按块比较（Myers 差异，按每一块单独转成的 Markdown 比），只动变了的块：没变的块连同 Markdown 写不出的格式原样留着；占位注释对应的块不删、可以跟着挪位置；空段落留在原处。插文字一律带上格式属性（Yjs 里不带属性插进去会沿用前一个字的格式）。
 - 客户端 id：AFFiNE 用的 yjs 13.6 是 32 位，yrs 打开 `small-client` 特性一样是 32 位。块 id 是 10 个字符的随机串，和 AFFiNE 自己生成的样子一样。
 
-测试：`cargo test -p tcms-affine` 13 个单元测试，都是自己造的文档：Markdown 子集往返、转义、中文标点、不转换的块、写进去再读出来（也编码成 Yjs 更新再应用一遍）、按条目切、改一条只动变了的块、插入删除条目、占位注释、Markdown 写不出的格式不丢、空段落、嵌套列表和只在白板里的 note。
+测试：`cargo test -p affine-doc` 里原来 A1 的 13 个单元测试，都是自己造的文档：Markdown 子集往返、转义、中文标点、不转换的块、写进去再读出来（也编码成 Yjs 更新再应用一遍）、按条目切、改一条只动变了的块、插入删除条目、占位注释、Markdown 写不出的格式不丢、空段落、嵌套列表和只在白板里的 note。
 
 另外在临时目录里手动对照过两样，没有放进 CI（要 Node 和 AFFiNE 的仓库）：
 
 - Rust 写的文档编码成更新，用 yjs 13.6.21 读：块的种类、`sys:version`、`sys:children`、带格式的文字、32 位客户端 id 都对；在 JS 里加一个块，Rust 读回来也对。
 - AFFiNE 仓库里 MIT 许可的读取器测试用的文档快照（`packages/common/reader/__tests__/__fixtures__/test-doc.snapshot.bin`）：读出 4 条，里面的数据库块变成占位注释。
 
-这个手动对照留了一个忽略的测试 `interop_with_affine_files`：设 `TCMS_AFFINE_FIXTURE=<快照文件>` 读一个 AFFiNE 文档打印 Markdown，设 `TCMS_AFFINE_DUMP=<文件>` 把样例文档写成 Yjs 更新，`cargo test -p tcms-affine -- --ignored` 跑。还没对着真的 AFFiNE 服务跑过（A2 做）。没加基准：A1 不在任何热路径上，基准在 A5。
+这个手动对照留了一个忽略的测试 `interop_with_affine_files`：设 `AFFINE_DOC_FIXTURE=<快照文件>` 读一个 AFFiNE 文档打印 Markdown，设 `AFFINE_DOC_DUMP=<文件>` 把样例文档写成 Yjs 更新，`cargo test -p affine-doc -- --ignored` 跑。还没对着真的 AFFiNE 服务跑过（A2 做）。没加基准：A1 不在任何热路径上，基准在 A5。
 
 ## 8. 已定的事（2026-11-24，维护者在卡片上选了“都按推荐定”）
 

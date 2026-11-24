@@ -572,12 +572,12 @@ fn random_ids_look_like_affine_ids() {
 
 /// 和 AFFiNE 互通的检查，平时不跑（要外面的文件）：
 ///
-/// - `TCMS_AFFINE_FIXTURE=<AFFiNE 导出的文档快照>`：读出来、按条目切开、打印 Markdown；
-/// - `TCMS_AFFINE_DUMP=<路径>`：把 `SAMPLE` 写成一篇文档，Yjs 更新存到这个路径，给 yjs 去读。
+/// - `AFFINE_DOC_FIXTURE=<AFFiNE 导出的文档快照>`：读出来、按条目切开、打印 Markdown；
+/// - `AFFINE_DOC_DUMP=<路径>`：把 `SAMPLE` 写成一篇文档，Yjs 更新存到这个路径，给 yjs 去读。
 #[test]
 #[ignore]
 fn interop_with_affine_files() {
-    if let Ok(path) = std::env::var("TCMS_AFFINE_FIXTURE") {
+    if let Ok(path) = std::env::var("AFFINE_DOC_FIXTURE") {
         let bytes = std::fs::read(&path).unwrap();
         let doc = Doc::new();
         doc.transact_mut()
@@ -592,7 +592,7 @@ fn interop_with_affine_files() {
             }
         }
     }
-    if let Ok(path) = std::env::var("TCMS_AFFINE_DUMP") {
+    if let Ok(path) = std::env::var("AFFINE_DOC_DUMP") {
         let doc = Doc::new();
         create(&doc, "流程", &to_blocks(SAMPLE), &mut RandomIds).unwrap();
         let update = doc

@@ -72,8 +72,8 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 
 | TCMS 的步 | 状态 | 在内核里对应 |
 | --- | --- | --- |
-| A1：`yrs` 读写 AFFiNE 的文档结构，块 ↔ 条目，Markdown 子集 ↔ 块 | 已合并（#23，`crates/tcms-affine`） | K1 直接搬过来当底子，再补全块的种类 |
-| A2：登录、socket.io、取文档、推更新、收广播、断线重连、GraphQL 的文件夹和评论 | 另一个线程正在做，还没推上来 | K3 就是它。**不重复写**：A2 写成不依赖 TCMS 的模块，K3 只是把它挪进内核的 crate |
+| A1：`yrs` 读写 AFFiNE 的文档结构，块 ↔ 条目，Markdown 子集 ↔ 块 | 已合并（#23），K1 第一个 PR 已搬进 `crates/affine-doc` | 内核的底子，再补全块的种类 |
+| A2：登录、socket.io、取文档、推更新、收广播、断线重连、GraphQL 的工作区和评论 | 另一个线程正在做，放在 `crates/tcms-affine-client`，不引用 TCMS 别的 crate | K3 就是它。**不重复写**：K3 只是把它挪进内核的 crate。根文档的文档列表、文件夹、文档属性 A2 不写，用 `affine-doc` 的 |
 | A3 到 A5：同步循环、审核页、基准 | 没做 | 留在 TCMS，用内核的库 |
 
 为了不和 A2 撞车，建议：内核这边先做 K1、K2（只动文档模型和导入导出），等 A2 合并后再做 K3 的搬迁。A2 那边只需要注意一件事：连接层别引用 `tcms-core` 之类的 TCMS 类型，以后好搬。
@@ -90,6 +90,14 @@ AFFiNE 以前做过一个 Rust 的“内核”OctoBase（AGPL-3.0，`reference/o
 | K3 | 同步协议客户端 `affine-sync-client`：就是 A2 的连接层挪过来 | A2 自己的测试 | A2 合并后 1 个小 PR，2 天 |
 | K4 | 本地存储：SQLite 里存更新、快照、时钟，定期合并，断网时能改、连上后补推（参考 MIT 的 `affine_nbstore` 的设计，不复制代码，不用它依赖的 AGPL crate） | 断网改、两端同时改、重启 | 1 到 2 个 PR，1.5 周 |
 | K5 | 基准 `tcms bench affine-doc`：读一篇 1 千个块的文档、合并 1 万条更新、导出整个工作区；同一份数据和 `y-octo` 比一次 | 门槛写进 `architecture.md` 第 10 节 | 1 个 PR，3 天 |
+
+### 5.1 K1 第一个 PR 做了什么（2026-11-24）
+
+- 新 crate `crates/affine-doc`（MIT，只依赖 yrs、comrak、similar、regex、getrandom、thiserror）：A1 的 `doc`、`markdown`、`model`、`sections` 原样搬过来（用 `git mv`，历史还在）；`tcms-affine` 只剩一行 `pub use affine_doc::*`，以后 A3 的同步循环写在那里。手动对照用的环境变量改名为 `AFFINE_DOC_FIXTURE`、`AFFINE_DOC_DUMP`。
+- `order`：AFFiNE 列表用的排序键。照公开的 `fractional-indexing` 算法自己写了一遍，外面再加 AFFiNE 的 `0` 加 32 个随机字符的后缀；生成的键能被 AFFiNE 再拿去当邻居。
+- `workspace`：根文档 `meta` 的工作区名字和文档列表（读 BlockSuite 写的 Y.Map 形式，也读普通对象形式；认不得的字段原样留着）；工作区“数据库”的通用表（`db$<表名>`，删除标记 `$$DELETED`）；文件夹树（建文件夹、放链接、改名、挪动、连同下面一起删，规矩和 AFFiNE 前端一样：根上只放文件夹、不能挪进自己下面）；文档属性（`custom:*` 这类不认得的字段不丢）。
+- 测试：原来的 13 个加上新的 11 个（排序键 6 个，其中 5 条是 AFFiNE 自己测试里写明的行为；工作区 5 个，都编码成 Yjs 更新在另一个 Doc 里应用再读）。都是自己造的数据，**还没拿真 AFFiNE 的根文档和 `db$folders` 对照过**：A2 那边对着 Docker 里的 AFFiNE 0.27.5-beta.3 核对过文件夹表的字段和排序键格式，和这里一致；拿真文档做的对照测试等 A2 合并后补。
+- 还没做：27 种块的结构（K1 第二个 PR）；0.27.5 服务端的“工作区状态”（开了以后文档列表以服务端为准），等 A2 核对。
 
 合计约 6 到 8 个 PR、5 到 7 周（两位工程师加 Claude；Claude 能写大部分代码，工程师主要读代码和对真 AFFiNE 验收）。
 
