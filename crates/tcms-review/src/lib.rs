@@ -75,6 +75,7 @@ pub fn router(live: Arc<Live>, writer: Writer, options: ReviewOptions) -> Router
         .route("/api/items", get(api::items))
         .route("/api/items/{id}", get(api::item))
         .route("/api/items/{id}/edit", post(api::edit))
+        .route("/api/items/{id}/promote", post(api::promote))
         .route("/api/remote", get(api::remote))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

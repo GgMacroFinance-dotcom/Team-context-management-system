@@ -115,6 +115,8 @@ fn lock(status: &Status) -> std::sync::MutexGuard<'_, RemoteStatus> {
 pub struct Writer {
     jobs: mpsc::UnboundedSender<(Job, Reply)>,
     status: Status,
+    /// 上下文仓库的路径（审核页查 `teams.yaml` 时只读）。
+    repo: PathBuf,
 }
 
 impl Writer {
@@ -134,6 +136,7 @@ impl Writer {
             ..RemoteStatus::default()
         }));
         let shared = status.clone();
+        let repo_path = repo.clone();
         std::thread::Builder::new()
             .name("tcms-writer".into())
             .spawn(move || {
@@ -177,7 +180,15 @@ impl Writer {
                 });
             })
             .map_err(|e| Error::Thread(e.to_string()))?;
-        Ok(Self { jobs, status })
+        Ok(Self {
+            jobs,
+            status,
+            repo: repo_path,
+        })
+    }
+
+    pub(crate) fn repo(&self) -> &std::path::Path {
+        &self.repo
     }
 
     /// 和远端打交道的情况（审核页显示）。

@@ -114,6 +114,8 @@ Accepted-by: <审核的人>
 
 审核页上的接受、改单条交给服务里一个专门的写入线程（`crates/tcms-review/src/writer.rs`）：gix 的仓库对象不能跨线程共享，批准的那段异步代码不能放进 axum 的多线程运行时，所以这个线程自己跑一个单线程运行时，一件一件做，每件重新打开上下文仓库；用的数据库连接池另开（最多 3 个连接），和读的请求分开。拒绝只动数据库，直接在请求里做。
 
+**晋升**（`crates/tcms-write/src/promote.rs`，规则见 `spec.md` 第 5 节）：人在审核页或 `tcms promote` 发起，做成一条 `supersede` 提议，范围换成更大的那个，标题、正文、类型、标签、复核日期照抄当时的条目，`base_revision` 记当时的版本号，相近的条目按新范围找；存提议、查重复、挡乱提和 agent 的提议走同一段代码（`propose::save`）。提议人是发起的人，`proposer_role` 空着；审核页上发起时 `proposer_token` 是审核的人的令牌 id，命令行是 `cli`。岗位属于哪个团队从索引到的那个提交里的 `teams.yaml` 查（审核页每次打开条目时只读地打开上下文仓库读一次）。批准走的是普通的取代：新条目写进新范围的默认文件，原来那条变成被取代。
+
 **人在审核页改单条**（`crates/tcms-write/src/edit_item.rs`）：和批准排同一个队（同一把进程锁和 advisory lock），索引带到 HEAD，条目要还是生效的、版本号要和打开页面时一样，然后像批准“修改”一样只替换那一条的文字（元数据里没改的字段原样保留，比如 `owner`），提交，增量索引，记审计 `item.edit`。提交信息：
 
 ```text
@@ -208,7 +210,7 @@ Edited-by: 王审核（tok_01JDX4...）
   - 工具出错（参数不对、`role` 和令牌不一致等）回 `isError` 和一句话，协议层的错只用于令牌不认、工具名不认识。
 - 审核页（`crates/tcms-review`，第 5 步）：和 `/mcp` 在同一个 axum 服务里（`--stdio` 时没有）。
   - `/review` 是一个静态页面，`app.js`、`app.css` 编进二进制（`include_str!`），不用构建前端，不加载外部资源；`/` 跳到 `/review`。
-  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`remote`（和远端同步的情况，下面）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
+  - 页面调 `/api/*` 的 JSON 接口（`api.rs`）：`me`、`proposals`、`proposals/{id}`（含差异、相近的条目现在的正文、默认写进的文件）、`proposals/{id}/accept`、`proposals/{id}/reject`、`due`、`items`、`items/{id}`、`items/{id}/edit`、`items/{id}/promote`（晋升，做成一条提议）、`remote`（和远端同步的情况，下面）。`items/{id}` 带上 `promote_to`（这一条能提到哪些范围），`proposals/{id}` 带上 `promotion`（换了范围的取代：从哪里到哪里）。每个请求带 `Authorization: Bearer <审核的人的令牌>`，每次都查库核对（吊销马上生效）。I.P. 控制台以后也可以调这些接口。
   - 令牌存在浏览器的 sessionStorage 里（关掉标签页就没了），每次请求放在请求头里，不用 cookie，所以没有跨站请求伪造的问题。页面只用 `textContent` 和建元素写内容，不拼 HTML。
   - 响应头：`Content-Security-Policy`（`default-src 'none'`，脚本、样式、请求只许同源，`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。和 `/mcp` 一样只接受 `Host` 是本机或 `--allowed-host` 写了的请求。
   - 出错时回 `{"error": 一句话, "code": ..., "current": 现在的版本号（版本落后时）}`：没找到 404，不是待审核、版本落后、目标没了、仓库正忙（HEAD 变了或工作区不干净）409，参数不对 400。

@@ -269,12 +269,16 @@
       h("h1", {}, p.title),
       h("div", { class: "badges" },
         badge(STATUS[p.status] || p.status, p.status),
-        badge(ACTION[p.action] || p.action),
+        badge(d.promotion ? "晋升" : (ACTION[p.action] || p.action)),
         badge(p.scope),
         badge(kindWord(p.kind))),
       flash ? h("div", { class: "note ok", role: "status" }, flash) : null,
       h("div", { class: "panel" }, fields([
-        ["提议人", `${p.proposer_name}（${p.proposer_token}，岗位 ${p.proposer_role}）`],
+        // 岗位空着的是人在审核页、命令行发起的（晋升）。
+        ["提议人", p.proposer_role
+          ? `${p.proposer_name}（${p.proposer_token}，岗位 ${p.proposer_role}）`
+          : `${p.proposer_name}（${p.proposer_token}，审核的人）`],
+        ["晋升", d.promotion ? `从 ${d.promotion.from} 提到 ${d.promotion.to}：批准以后写进 ${d.promotion.to} 的一条新的，${d.promotion.from} 里原来那条变成被取代` : null],
         ["提的时间", `${p.created_at} UTC`],
         ["目标", p.item_id ? h("a", { href: `#/items/${enc(p.item_id)}` }, p.item_id) : null],
         ["理由", p.reason],
@@ -492,7 +496,47 @@
       h("pre", { class: "body" }, it.body || "（空）"),
     ];
     if (it.status === "active") parts.push(h("h2", {}, "改这一条"), editItem(it, status), status);
+    if (d.promote_to.length) parts.push(h("h2", {}, "提到更大范围"), promoteItem(it, d.promote_to));
     render(...parts);
+  }
+
+  const scopeWord = (s) => (s === "org" ? "全公司（org）" : s.startsWith("team:") ? `团队 ${s.slice(5)}（${s}）` : s);
+
+  // 晋升：做成一条提议（换了范围的取代），进待审核的列表，要再批准一次才生效。
+  function promoteItem(it, targets) {
+    const to = h("select", { id: "promote-to" }, targets.map((t) => h("option", { value: t }, scopeWord(t))));
+    const reason = h("textarea", { id: "promote-reason", rows: 3, placeholder: "比如：几个岗位都要用到" });
+    const go = h("button", { type: "submit", class: "secondary" }, "做成一条晋升提议");
+    const note = h("div", {});
+    return h("form", {
+      class: "stack panel", id: "promote-form",
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        if (!reason.value.trim()) {
+          note.replaceChildren(h("div", { class: "note warn", role: "alert" }, "写一句为什么要提到更大的范围。"));
+          return;
+        }
+        go.disabled = true;
+        note.replaceChildren(h("p", { class: "muted" }, "正在提…"));
+        try {
+          const r = await api("POST", `/api/items/${enc(it.id)}/promote`, { to: to.value, reason: reason.value });
+          history.pushState(null, "", `#/proposals/${enc(r.proposal_id)}`);
+          setTab("proposals");
+          await showProposal(r.proposal_id, r.duplicate
+            ? "一样的晋升已经有一条在等审核，这就是那一条。"
+            : "已做成一条晋升提议，批准以后才生效。");
+        } catch (e) {
+          go.disabled = false;
+          if (e.status === 401) return;
+          note.replaceChildren(h("div", { class: "note err", role: "alert" }, e.message));
+        }
+      },
+    },
+    h("label", {}, "提到", to),
+    h("label", {}, "理由（审核的人会看到）", reason),
+    h("div", { class: "actions" }, go),
+    note,
+    h("p", { class: "muted small" }, `批准以后在新的范围里写一条一样的，取代 ${it.scope} 里的这一条；能看到新范围的 agent 都会用上它。`));
   }
 
   // 改单条的纯文本：标题、标签、复核日期、正文。类型、范围不在这里改。

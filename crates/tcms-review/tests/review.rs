@@ -875,3 +875,78 @@ async fn remote_push_and_needs_merge() {
 
     f.store.drop_schema().await.unwrap();
 }
+
+/// 晋升：条目页给出能提到的范围；提了以后是一条待审核的提议，标成晋升，批准以后原来那条被取代。
+#[tokio::test]
+async fn promote_from_item_page() {
+    let Some(f) = fixture().await else { return };
+    let it = get(&f, &format!("/api/items/{MACRO}")).await;
+    assert_eq!(it["promote_to"], json!(["team:research", "org"]), "{it}");
+    assert_eq!(
+        get(&f, &format!("/api/items/{RULE}")).await["promote_to"],
+        json!([])
+    );
+
+    // agent 的令牌不能用；范围不对、没写理由时 400。
+    let path = format!("/api/items/{MACRO}/promote");
+    let r = send(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.agent_secret),
+        Some(json!({"to": "org", "reason": "x"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    for bad in [
+        json!({"to": "team:sales", "reason": "都要用"}),
+        json!({"to": "org", "reason": " "}),
+        json!({"to": "公司", "reason": "都要用"}),
+    ] {
+        let r = post(&f, &path, bad.clone()).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(r.json()["code"], "invalid");
+    }
+
+    let r = post(
+        &f,
+        &path,
+        json!({"to": "team:research", "reason": "数据岗位也要用"}),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let id = r.json()["proposal_id"].as_str().unwrap().to_owned();
+    let d = get(&f, &format!("/api/proposals/{id}")).await;
+    assert_eq!(
+        d["promotion"],
+        json!({"from": "role:macro", "to": "team:research"}),
+        "{d}"
+    );
+    assert_eq!(d["proposal"]["proposer_name"], "王审核");
+    assert_eq!(d["proposal"]["proposer_role"], "");
+    assert_eq!(d["default_file"], "team-research/事实.md");
+
+    // 再批准一次才生效。
+    let r = post(&f, &format!("/api/proposals/{id}/accept"), json!({})).await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let v = r.json();
+    assert_eq!(v["path"], "team-research/事实.md");
+    let new = get(&f, &format!("/api/items/{}", v["item"].as_str().unwrap())).await;
+    assert_eq!(new["item"]["scope"], "team:research");
+    assert_eq!(new["item"]["supersedes"], MACRO);
+    let old = get(&f, &format!("/api/items/{MACRO}")).await;
+    assert_eq!(old["item"]["status"], "superseded");
+    assert_eq!(old["promote_to"], json!([]));
+
+    f.store.drop_schema().await.unwrap();
+}

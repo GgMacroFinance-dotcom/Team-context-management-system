@@ -14,7 +14,7 @@ use tcms_search::{Corpus, SearchIndex};
 use tcms_store::{Identity, NewToken, Store};
 use tcms_write::{
     AcceptOptions, Committer, ItemEdit, MAX_OPEN_PER_AGENT, Proposal, ProposeArgs, ProposeError,
-    WriteError, accept, edit_item, propose, reject, sync,
+    WriteError, accept, edit_item, promote, propose, read_teams, reject, sync,
 };
 
 const RULE: &str = "ctx_01JDX4M6Q8AAAAAAAAAAAAAAAA";
@@ -1137,6 +1137,106 @@ async fn pulled_items_get_ids() {
         .unwrap()
         .expect("进了索引");
     assert_eq!(row.scope, "team:research");
+
+    f.store.drop_schema().await.unwrap();
+}
+
+/// 晋升：岗位的条目提到团队、全公司，做成一条换了范围的取代提议；批准以后新范围里有一条一样的，原来那条被取代。
+#[tokio::test]
+async fn promote_role_item() {
+    let Some(f) = fixture().await else { return };
+    let (s, dir) = (&f.store, f.path.as_path());
+    let head = git(dir, &["rev-parse", "HEAD"]).trim().to_owned();
+    let teams = read_teams(&f.repo, &head).unwrap().expect("有 teams.yaml");
+    let idx = index(s).await;
+    // 审核的人发起：岗位空着。
+    let by = Identity {
+        token_id: "cli".to_owned(),
+        name: "王审核".to_owned(),
+        role: String::new(),
+        team: None,
+        projects: Vec::new(),
+    };
+    let team: tcms_core::Scope = "team:research".parse().unwrap();
+    let org: tcms_core::Scope = "org".parse().unwrap();
+    let err = |r: Result<Proposal, ProposeError>| match r {
+        Err(ProposeError::Invalid(m)) => m,
+        other => panic!("应该被挡下：{other:?}"),
+    };
+
+    // 挡下的：没写理由、提到别的团队、全公司的条目、没有的条目。
+    let m = err(promote(s, &idx, MACRO, &team, "  ", Some(&teams), &by).await);
+    assert!(m.contains("为什么"), "{m}");
+    let other: tcms_core::Scope = "team:sales".parse().unwrap();
+    let m = err(promote(s, &idx, MACRO, &other, "都要用", Some(&teams), &by).await);
+    assert!(m.contains("team:research、org"), "{m}");
+    let m = err(promote(s, &idx, RULE, &org, "都要用", Some(&teams), &by).await);
+    assert!(m.contains("已经是全公司的了"), "{m}");
+    let m = err(promote(s, &idx, NOWHERE, &org, "都要用", Some(&teams), &by).await);
+    assert!(m.contains("没有这一条"), "{m}");
+
+    // 提到团队：照抄标题、正文、类型、标签。
+    let p = promote(s, &idx, MACRO, &team, "数据岗位也要用", Some(&teams), &by)
+        .await
+        .unwrap();
+    assert!(!p.duplicate);
+    assert_eq!(
+        (
+            p.action.as_str(),
+            p.item_id.as_deref(),
+            p.scope.as_str(),
+            p.kind.as_str()
+        ),
+        ("supersede", Some(MACRO), "team:research", "fact")
+    );
+    let row = s.get_proposal(&p.proposal_id).await.unwrap().unwrap();
+    let old = s.get_item(MACRO).await.unwrap().unwrap();
+    assert_eq!(
+        (row.title.as_str(), row.body.as_str()),
+        (old.title.as_str(), old.body.as_str())
+    );
+    assert_eq!(row.tags, old.tags);
+    assert_eq!(row.base_revision, Some(old.revision));
+    assert_eq!(
+        (row.proposer_name.as_str(), row.proposer_role.as_str()),
+        ("王审核", "")
+    );
+    // 同样的晋升再提一次：返回原来那条。
+    let again = promote(s, &idx, MACRO, &team, "换个说法", Some(&teams), &by)
+        .await
+        .unwrap();
+    assert!(
+        again.duplicate && again.proposal_id == p.proposal_id,
+        "{again:?}"
+    );
+
+    // 批准：写进 team-research/事实.md，取代原来那条。
+    let a = accept(&f.repo, s, &p.proposal_id, &opts()).await.unwrap();
+    assert_eq!(a.path, "team-research/事实.md");
+    assert_eq!(a.item, p.result_item_id);
+    let text = read(dir, "team-research/事实.md");
+    assert!(
+        text.contains(&format!("supersedes={MACRO}")) && text.contains(&old.body),
+        "{text}"
+    );
+    let new = s.get_item(&a.item).await.unwrap().unwrap();
+    assert_eq!(
+        (new.status.as_str(), new.scope.as_str(), new.title.as_str()),
+        ("active", "team:research", old.title.as_str())
+    );
+    assert_eq!(
+        s.get_item(MACRO).await.unwrap().unwrap().status,
+        "superseded"
+    );
+
+    // 团队的再提到全公司；没有 teams.yaml 时岗位只能提到全公司。
+    let idx = index(s).await;
+    let p = promote(s, &idx, &a.item, &org, "全公司都用", Some(&teams), &by)
+        .await
+        .unwrap();
+    assert_eq!(p.scope, "org");
+    let m = err(promote(s, &idx, DATA, &team, "x", None, &by).await);
+    assert!(m.contains("只能提到 org"), "{m}");
 
     f.store.drop_schema().await.unwrap();
 }

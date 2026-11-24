@@ -16,7 +16,7 @@ use crate::conflicts::{Conflict, find_conflicts};
 pub const MAX_OPEN_PER_AGENT: i64 = 20;
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_BODY_CHARS: usize = 20_000;
-const MAX_REASON_CHARS: usize = 2_000;
+pub(crate) const MAX_REASON_CHARS: usize = 2_000;
 const MAX_EVIDENCE: usize = 10;
 const MAX_EVIDENCE_CHARS: usize = 500;
 const MAX_TAGS: usize = 20;
@@ -77,7 +77,7 @@ pub enum ProposeError {
     Store(#[from] tcms_store::Error),
 }
 
-fn invalid<T>(msg: impl Into<String>) -> Result<T, ProposeError> {
+pub(crate) fn invalid<T>(msg: impl Into<String>) -> Result<T, ProposeError> {
     Err(ProposeError::Invalid(msg.into()))
 }
 
@@ -114,7 +114,7 @@ pub fn item_id_of(p: &ProposalRow) -> String {
     }
 }
 
-fn chars(s: &str) -> usize {
+pub(crate) fn chars(s: &str) -> usize {
     s.chars().count()
 }
 
@@ -357,7 +357,16 @@ pub async fn propose(
         content_hash: hash,
         redacted: redacted as i32,
     };
-    let (row, duplicate) = match store.create_proposal(who, &new, MAX_OPEN_PER_AGENT).await? {
+    save(store, who, &new).await
+}
+
+/// 存一条提议（同样的内容还没处理时返回原来那条），换成回给提议人的结果。
+pub(crate) async fn save(
+    store: &Store,
+    who: &Identity,
+    new: &NewProposal,
+) -> Result<Proposal, ProposeError> {
+    let (row, duplicate) = match store.create_proposal(who, new, MAX_OPEN_PER_AGENT).await? {
         Proposed::New(r) => (r, false),
         Proposed::Duplicate(r) => (r, true),
         Proposed::TooMany { open } => {
@@ -398,18 +407,18 @@ pub async fn propose(
 
 /// 算重复用的内容：理由不算（同样的改动换个说法也算重复）。
 #[derive(Serialize)]
-struct ContentKey<'a> {
-    action: &'static str,
-    item_id: Option<&'a str>,
-    scope: String,
-    kind: &'static str,
-    title: &'a str,
-    body: &'a str,
-    tags: &'a [String],
-    review_by: Option<&'a str>,
+pub(crate) struct ContentKey<'a> {
+    pub action: &'static str,
+    pub item_id: Option<&'a str>,
+    pub scope: String,
+    pub kind: &'static str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub tags: &'a [String],
+    pub review_by: Option<&'a str>,
 }
 
-fn content_hash(k: &ContentKey<'_>) -> String {
+pub(crate) fn content_hash(k: &ContentKey<'_>) -> String {
     let json = serde_json::to_vec(k).expect("序列化内存里的结构不会失败");
     Sha256::digest(&json)
         .iter()
