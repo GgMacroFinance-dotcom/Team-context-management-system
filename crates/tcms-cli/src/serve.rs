@@ -55,6 +55,15 @@ pub async fn run(store: Store, args: ServeArgs) -> Result<()> {
         None
     };
 
+    // 行级安全管不了超级用户和带 BYPASSRLS 的账号（docs/architecture.md 第 5 节）。
+    match store.bypasses_row_security().await {
+        Ok(false) => {}
+        Ok(true) => eprintln!(
+            "提醒：连数据库的账号是超级用户或带 BYPASSRLS，数据库的行级安全对它不起作用，只剩服务本身按范围过滤；\
+             换成普通账号连（拥有 schema 就够）"
+        ),
+        Err(e) => eprintln!("提醒：查不了连数据库的账号能不能绕过行级安全：{e}"),
+    }
     let live = Live::load(store).await.context("取条目、建检索索引")?;
     report(&live);
     let follow = live.spawn_follow();

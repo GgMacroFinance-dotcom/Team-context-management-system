@@ -24,7 +24,7 @@ docker build -t tcms .
 
 | 变量 | 说明 |
 | --- | --- |
-| `TCMS_DATABASE_URL` | 必填，PostgreSQL 连接串 |
+| `TCMS_DATABASE_URL` | 必填，PostgreSQL 连接串。用普通账号（拥有 schema 就够），数据库的行级安全才起作用；超级用户和带 `BYPASSRLS` 的账号不受它管，启动时会提醒（`docs/architecture.md` 第 5 节） |
 | `TCMS_SCHEMA` | 用哪个 schema，默认 `tcms`。schema 已经由管理员建好时，账号不需要在库里建 schema 的权限 |
 | `TCMS_REPO` | 上下文仓库，镜像里默认 `/var/lib/tcms/context` |
 | `TCMS_LISTEN` | 监听地址，镜像里默认 `0.0.0.0:7341`。健康检查跟着它的端口走 |
@@ -39,6 +39,8 @@ docker build -t tcms .
 ## 单独部署
 
 以下都在 `deploy/` 目录里执行。
+
+> 这份 compose 里 tcms 用 PostgreSQL 镜像建的账号 `tcms` 连，它是超级用户，数据库的行级安全对它不起作用，只剩服务本身按范围过滤，启动日志里会提醒一句。和 I.P. 一起部署时 tcms 用的是普通账号 `tcms_app`，起作用。
 
 1. **密钥**：复制 `env.example`，用 `openssl rand -hex 24` 生成 `POSTGRES_PASSWORD` 填进去。`.env` 已被 git 忽略。
 

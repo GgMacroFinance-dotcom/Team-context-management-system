@@ -1,13 +1,16 @@
-//! 令牌、审计，和按可见范围查变更（MCP 服务端用）。
+//! 令牌、审计，和按令牌能看的范围读条目、查变更（MCP 服务端用）。
 //!
 //! 令牌有两种：给 agent 的（连 MCP，绑定岗位、团队、项目），和给审核的人的（登录审核页）。两种互不通用。
+//!
+//! agent 的读在只读事务里，开头写上令牌能看的范围，数据库的行级安全按它放行（迁移 0005，
+//! `docs/architecture.md` 第 5 节）。这里的 SQL 和调用的地方也按范围过滤，行级安全是兜底。
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use sqlx::postgres::PgListener;
+use sqlx::{Postgres, Row, Transaction};
 
-use crate::{Error, NOTIFY_CHANNEL, Result, Store};
+use crate::{Error, ItemRow, NOTIFY_CHANNEL, Result, Store, item_row};
 
 /// 令牌明文的前缀，方便认出来（比如在日志、密钥扫描里）。
 pub const TOKEN_PREFIX: &str = "tcms_";
@@ -74,6 +77,29 @@ impl Identity {
         );
         s
     }
+}
+
+/// 在事务里写上这个令牌能看的范围，只在这个事务里有效（`set_config` 的第三个参数）。
+/// 写了以后 `items`、`item_versions`、`changes` 只放行这些范围的行；范围是空数组时什么都看不到。
+async fn set_reach(tx: &mut Transaction<'static, Postgres>, who: &Identity) -> Result<()> {
+    sqlx::query(
+        "SELECT set_config('tcms.scopes', $1::text[]::text, true), \
+                set_config('tcms.all_projects', $2, true)",
+    )
+    .bind(who.scope_strings())
+    .bind(if who.all_projects() { "on" } else { "off" })
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// [`Store::read_as`] 读到的一条。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemRead {
+    /// 现在的这一版。
+    pub current: ItemRow,
+    /// 要的那个版本：没要旧版本时就是现在这一版；那个版本没有（或者看不到）时是 `None`。
+    pub version: Option<ItemRow>,
 }
 
 /// 审核的人（审核页的令牌背后的人）。
@@ -275,19 +301,23 @@ impl Store {
         )
     }
 
-    /// `context_changes`：序号大于 `after`、范围在 `scopes` 里（`all_projects` 时所有项目也算）的变更，最多 `limit` 条。
+    /// `context_changes`：序号大于 `after`、这个令牌能看的范围里的变更，最多 `limit` 条。
+    /// 标题是条目现在的标题，条目现在的范围看不到时没有标题。
     pub async fn visible_changes(
         &self,
+        who: &Identity,
         after: i64,
-        scopes: &[String],
-        all_projects: bool,
         limit: usize,
     ) -> Result<VisibleChanges> {
         let limit = limit.max(1);
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            .await?;
+        let mut tx = self.begin_read().await?;
+        // 最大序号在写上范围之前取：cursor 跳过看不到的变更，和账号受不受行级安全管无关。
+        // 可重复读，后面的查询和它是同一个快照。
+        let latest: i64 = sqlx::query("SELECT coalesce(max(seq), 0)::int8 FROM changes")
+            .fetch_one(&mut *tx)
+            .await?
+            .get(0);
+        set_reach(&mut tx, who).await?;
         let rows = sqlx::query(
             "SELECT c.seq, c.item_id, c.scope, c.revision, c.change, c.commit_id, i.title
              FROM changes c LEFT JOIN items i ON i.id = c.item_id
@@ -295,15 +325,11 @@ impl Store {
              ORDER BY c.seq LIMIT $4",
         )
         .bind(after)
-        .bind(scopes)
-        .bind(all_projects)
+        .bind(who.scope_strings())
+        .bind(who.all_projects())
         .bind(limit as i64 + 1)
         .fetch_all(&mut *tx)
         .await?;
-        let latest: i64 = sqlx::query("SELECT coalesce(max(seq), 0)::int8 FROM changes")
-            .fetch_one(&mut *tx)
-            .await?
-            .get(0);
         tx.commit().await?;
         let more = rows.len() > limit;
         let changes: Vec<VisibleChange> = rows
@@ -329,6 +355,61 @@ impl Store {
             cursor,
             more,
         })
+    }
+
+    /// `context_read`：按这个令牌能看的范围读一条，现在的这一版和要的那个版本（`revision` 不写、或者就是现在的版本号时不再查）。
+    /// 看不到的和不存在的一样是 `None`。行级安全在账号是超级用户或带 BYPASSRLS 时不起作用，
+    /// 所以调用的地方还要自己查一遍两个版本的范围。
+    pub async fn read_as(
+        &self,
+        who: &Identity,
+        id: &str,
+        revision: Option<i32>,
+    ) -> Result<Option<ItemRead>> {
+        let mut tx = self.begin_read().await?;
+        set_reach(&mut tx, who).await?;
+        let current = sqlx::query(select_row!("WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| item_row(&r));
+        let Some(current) = current else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let version = match revision {
+            None => Some(current.clone()),
+            Some(r) if r == current.revision => Some(current.clone()),
+            Some(r) => {
+                let snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+                    "SELECT snapshot FROM item_versions WHERE item_id = $1 AND revision = $2",
+                )
+                .bind(id)
+                .bind(r)
+                .fetch_optional(&mut *tx)
+                .await?;
+                snapshot.map(serde_json::from_value).transpose()?
+            }
+        };
+        tx.commit().await?;
+        Ok(Some(ItemRead { current, version }))
+    }
+
+    /// 连数据库用的账号是不是超级用户或带 BYPASSRLS。是的话行级安全对它不起作用，只剩服务本身的过滤。
+    pub async fn bypasses_row_security(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// agent 读用的事务：只读、可重复读，几次查询看到的是同一个快照。
+    async fn begin_read(&self) -> Result<Transaction<'static, Postgres>> {
+        Ok(self
+            .pool
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .await?)
     }
 
     /// 订阅变更通知（`NOTIFY tcms_changes`）。

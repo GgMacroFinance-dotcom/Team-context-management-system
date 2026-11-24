@@ -168,6 +168,7 @@ agent 交三样：我是谁（团队、岗位）、这次在做什么（任务�
 | `context_propose` | `action`, `item_id?`, `draft`, `reason`, `evidence?` | 提议 id 和找到的矛盾 |
 
 - 调用者的身份（团队、岗位）在连接时由令牌决定，参数里的 `role` 必须和令牌一致，看不到的条目和不存在的条目回答一样。
+- 数据库再拦一道（2026-11-24）：`context_read`、`context_changes` 查 PostgreSQL 时，事务开头写上令牌能看的范围，`items`、`item_versions`、`changes` 的行级安全只放行这些范围；服务本身照样过滤，这一层是兜底（`architecture.md` 第 5 节）。`context_read` 读旧版本时，现在这一版和那个版本当时所在的范围都要看得到。
 - 传输：stdio 和 Streamable HTTP 两种。
 - 第 3 步（2026-11-23）的细节：
   - 前四个工具做了，`context_propose` 第 4 步和提议一起做（见第 5 节的细节）。返回 `proposal_id`、`status`、`duplicate`、`action`、`item_id`、批准后的条目 id `result_item_id`、范围、类型、标题、`conflicts`（id、版本、范围、类型、标题、相近程度 0 到 100）、`redacted`（抹了几处）和一句 `note`。

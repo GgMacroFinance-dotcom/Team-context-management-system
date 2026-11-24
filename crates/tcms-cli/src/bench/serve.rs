@@ -3,6 +3,7 @@
 //!
 //! - 启动：取条目、建检索索引、握手；
 //! - `context_get`、`context_search` 经过 stdio 的一次往返（含每次调用核对令牌）；
+//! - `context_read`、`context_changes` 经过 stdio 的一次往返（在带令牌范围的只读事务里查 PostgreSQL，行级安全按范围放行）；
 //! - 令牌核对本身（查一次 PostgreSQL）；
 //! - 加一个文件、`tcms reindex` 以后，服务多久能搜到新内容（收到通知后整份重建）；
 //! - 子进程处理过请求以后的物理内存，换过 1 次和 5 次索引以后的（看重建会不会让内存越涨越多），
@@ -31,6 +32,10 @@ use super::{Percentiles, ms, percentiles, rss_kb, temp_schema};
 const GET_P95_LIMIT: Duration = Duration::from_millis(30);
 /// `context_search` 经过 stdio 一次往返的 p95 门槛。检索本身的门槛是 10 毫秒。
 const SEARCH_P95_LIMIT: Duration = Duration::from_millis(15);
+/// `context_read` 经过 stdio 一次往返的 p95 门槛（带令牌范围的只读事务里查一两次 PostgreSQL）。
+const READ_P95_LIMIT: Duration = Duration::from_millis(15);
+/// `context_changes` 经过 stdio 一次往返的 p95 门槛（同上，默认最多 200 条）。
+const CHANGES_P95_LIMIT: Duration = Duration::from_millis(15);
 /// 核对一次令牌的 p95 门槛。
 const IDENTIFY_P95_LIMIT: Duration = Duration::from_millis(5);
 /// 加一个文件、索引完，到服务里搜得到的门槛（1 万条）。
@@ -68,7 +73,7 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
     let m = result?;
 
     println!(
-        "服务的基准：{items} 条、{files} 个文件，tcms serve --stdio 子进程，context_get（预算 {budget} token）、context_search、令牌核对、context_propose 各 {requests} 次，批准 {ACCEPTS} 次"
+        "服务的基准：{items} 条、{files} 个文件，tcms serve --stdio 子进程，context_get（预算 {budget} token）、context_search、context_read、context_changes、令牌核对、context_propose 各 {requests} 次，批准 {ACCEPTS} 次"
     );
     println!(
         "  启动（取条目、建索引、握手）        {:>8.1} 毫秒",
@@ -84,6 +89,8 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
     };
     row("context_get 往返  ", &m.get, GET_P95_LIMIT);
     row("context_search 往返", &m.search, SEARCH_P95_LIMIT);
+    row("context_read 往返 ", &m.read, READ_P95_LIMIT);
+    row("context_changes 往返", &m.changes, CHANGES_P95_LIMIT);
     row("核对令牌          ", &m.identify, IDENTIFY_P95_LIMIT);
     row("context_propose 往返", &m.propose, PROPOSE_P95_LIMIT);
     row("批准一条          ", &m.accept, ACCEPT_P95_LIMIT);
@@ -109,6 +116,8 @@ pub async fn run(items: usize, requests: usize, budget: usize, check: bool) -> R
     for (bad, what) in [
         (m.get.p95 > GET_P95_LIMIT, "context_get 往返"),
         (m.search.p95 > SEARCH_P95_LIMIT, "context_search 往返"),
+        (m.read.p95 > READ_P95_LIMIT, "context_read 往返"),
+        (m.changes.p95 > CHANGES_P95_LIMIT, "context_changes 往返"),
         (m.identify.p95 > IDENTIFY_P95_LIMIT, "核对令牌"),
         (m.propose.p95 > PROPOSE_P95_LIMIT, "context_propose 往返"),
         (m.accept.p95 > ACCEPT_P95_LIMIT, "批准一条"),
@@ -145,6 +154,8 @@ struct Measured {
     startup: Duration,
     get: Percentiles,
     search: Percentiles,
+    read: Percentiles,
+    changes: Percentiles,
     identify: Percentiles,
     propose: Percentiles,
     accept: Percentiles,
@@ -306,6 +317,41 @@ async fn measure(
     }
     let rss_served = pid.and_then(|p| rss_kb(Some(p)));
 
+    // 读单条、问变更：每次在带令牌范围的只读事务里查 PostgreSQL（行级安全，architecture.md 第 5 节）。
+    let who = store
+        .identify(&secret)
+        .await?
+        .context("刚发的令牌核对不上")?;
+    let scopes = who.scope_strings();
+    let visible: Vec<String> = store
+        .snapshot()
+        .await?
+        .items
+        .into_iter()
+        .filter(|it| scopes.contains(&it.row.scope) || it.row.scope.starts_with("project:"))
+        .map(|it| it.row.id)
+        .collect();
+    ensure!(!visible.is_empty(), "基准数据里没有令牌看得到的条目");
+    let latest = store.latest_cursor().await?;
+    call(&client, "context_read", json!({"id": visible[0]})).await?;
+    let mut read = Vec::with_capacity(requests);
+    for _ in 0..requests {
+        let id = &visible[gen_.rng.below(visible.len())];
+        let t = Instant::now();
+        let v = call(&client, "context_read", json!({"id": id})).await?;
+        read.push(t.elapsed());
+        ensure!(v["id"] == id.as_str(), "context_read 的结果不对");
+    }
+    let mut changes = Vec::with_capacity(requests);
+    for _ in 0..requests {
+        // 从任意一个序号往后问，默认最多 200 条。
+        let since = gen_.rng.below(usize::try_from(latest.max(1))?);
+        let t = Instant::now();
+        let v = call(&client, "context_changes", json!({"since_cursor": since})).await?;
+        changes.push(t.elapsed());
+        ensure!(v["changes"].is_array(), "context_changes 的结果不对");
+    }
+
     // 加一个文件，量到服务里搜得到要多久；再加几次，看物理内存稳不稳。
     let mut swaps = Vec::new();
     let mut reindex = Duration::ZERO;
@@ -399,6 +445,8 @@ async fn measure(
         startup,
         get: percentiles(get),
         search: percentiles(search),
+        read: percentiles(read),
+        changes: percentiles(changes),
         identify: percentiles(identify),
         propose: percentiles(propose),
         accept: percentiles(accept),
