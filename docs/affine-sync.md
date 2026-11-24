@@ -153,7 +153,7 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 
 ### 7.2 A2 做了什么（2026-11-24）
 
-代码在新 crate `crates/tcms-affine-client`。它只认 AFFiNE 的协议，收发的是 Yjs 更新的字节，不用 TCMS 自己的类型，测试里也只用 `affine-doc`（以后要整体搬进 AFFiNE 内核方案里的 `affine-sync-client`）。
+代码在 `crates/affine-sync-client`（原名 `tcms-affine-client`，2026-11-24 合并后改名搬进 AFFiNE 内核，见 `affine-kernel-rust.md` 的 K3）。它只认 AFFiNE 的协议，收发的是 Yjs 更新的字节，不用 TCMS 自己的类型，测试里也只用 `affine-doc`。
 
 - **连接**：TCP，`https` 时接 TLS（rustls 加 ring，Mozilla 的根证书，自托管用自己的 CA 时可以再给一个 PEM 文件）。HTTP 一次一个连接（hyper），WebSocket 用 tungstenite。不支持走 HTTP 代理。
 - **登录**：`POST /api/auth/sign-in` 用邮箱密码登录，拿网页版那种 cookie 会话（`affine_session`、`affine_user_id`，0.27.5-beta.3 的会话 15 天过期）。以后 HTTP 和 WebSocket 握手都带这个 cookie，还带 `x-affine-version`。7 天重新登录一次；服务端说没登录时马上重新登录再试一次。原生 App 用的那条路（换 JWT、`/api/auth/session/refresh`）没用：要装成原生客户端，对一个后台账号没好处。AFFiNE 对登录限流，连着登录失败（比如密码错）会被拒一阵子（`TOO_MANY_REQUEST`），这算“过一会儿再试”的错。
@@ -172,7 +172,7 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 
 测试：
 
-- `cargo test -p tcms-affine-client` 的单元测试对着本机起的一个假 AFFiNE（只会登录、`/info` 和几个 socket.io 事件）：握手、加入（不重复加入）、取（带状态向量、文档不存在）、推、时间戳、广播、回心跳、断掉以后重连并重新加入、密码不对、连不上。CI 里跑这些。
+- `cargo test -p affine-sync-client` 的单元测试对着本机起的一个假 AFFiNE（只会登录、`/info` 和几个 socket.io 事件）：握手、加入（不重复加入）、取（带状态向量、文档不存在）、推、时间戳、广播、回心跳、断掉以后重连并重新加入、密码不对、连不上。CI 里跑这些。
 - `tests/affine.rs` 对着真的 AFFiNE：新建工作区，推根文档（文档列表用 `affine-doc` 的 `workspace` 写）和一篇用 `affine-doc` 写的文档，读回来一样；另一条连接收到这条连接推的修改，改的人对；`doc_timestamps`；断开重连以后还收得到别人改的；拿状态向量取差量以后什么都不缺；GraphQL 的工作区、最近改过的文档、评论（发、列出、已解决、变化、删）；登录不上。要设 `AFFINE_TEST_URL`、`AFFINE_TEST_EMAIL`、`AFFINE_TEST_PASSWORD`，没设就跳过，CI 里没有 AFFiNE。2026-11-24 在开发机上对着 Docker 里的 `ghcr.io/toeverything/affine:0.27.5-beta.3`（加 `pgvector/pgvector:pg16`、`redis:7`，照 AFFiNE 的 `.docker/selfhost/compose.yml`）连跑 4 次都过。
 - 另外手动用无头浏览器（Playwright）对照了 AFFiNE 网页版：Rust 写进去的文档在 AFFiNE 编辑器里打开，标题、二级标题、粗体、列表都对；在网页编辑器里打的字，Rust 这边收到广播、读成 Markdown 也对；连着的时候重启 AFFiNE 容器，4 秒后自己连回来。这些没写成自动测试（要浏览器和 AFFiNE）。
 

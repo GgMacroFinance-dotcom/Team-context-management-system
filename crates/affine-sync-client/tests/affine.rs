@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use affine_doc::{RandomIds, Section, workspace};
-use tcms_affine_client::{
+use affine_sync_client::{
     Client, Config, Credentials, DocMode, Error, Intent, SyncConnection, SyncEvent,
     comment_content, comment_text,
 };

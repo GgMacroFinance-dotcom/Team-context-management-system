@@ -4,8 +4,8 @@
 //!   最近改过的文档、评论）。
 //! - [`SyncConnection`]：socket.io 上的同步协议，收发的是 Yjs 更新的字节；断线以后自己重连。
 //!
-//! 这个 crate 只认 AFFiNE 的协议，不用 TCMS 自己的类型（以后要原样搬进 AFFiNE 内核那边的 `affine-sync-client`）。
-//! 文档里面是什么（块、条目、文件夹表）由 `tcms-affine` 和以后的 `affine-doc` 管。
+//! 这个 crate 只认 AFFiNE 的协议，不用 TCMS 自己的类型。2026-11-24 从 TCMS 的 `tcms-affine-client`（A2）原样改名搬进
+//! AFFiNE 内核（`docs/affine-kernel-rust.md` 的 K3）。文档里面是什么（块、条目、文件夹表）由 `affine-doc` 管。
 //!
 //! 按 AFFiNE 0.27.5 的协议写（0.27.5 的正式镜像还没出，对着 `0.27.5-beta.3` 测过）；这是 AFFiNE 客户端自己用的协议，
 //! 没有承诺对外稳定，跟着 AFFiNE 的版本走。

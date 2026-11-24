@@ -84,7 +84,7 @@ impl Client {
             .collect()
     }
 
-    /// 新建一个工作区，返回它的 id。服务端这时还没有根文档，要自己推一个（见 `tcms-affine` 的 `workspace`）。
+    /// 新建一个工作区，返回它的 id。服务端这时还没有根文档，要自己推一个（见 `affine-doc` 的 `workspace`）。
     pub async fn create_workspace(&self) -> Result<String, Error> {
         let data = self
             .graphql("mutation { createWorkspace { id } }", json!({}))
