@@ -6,7 +6,7 @@
 //!   BlockSuite 写进去时会把普通对象转成 Y.Map、数组转成 Y.Array）、`properties`（标签的选项）。
 //!   见 `packages/frontend/core/src/modules/workspace/impls/meta.ts`、
 //!   `blocksuite/framework/store/src/extension/workspace/workspace-meta.ts`。
-//! - 工作区的“数据库”每张表一篇 Yjs 文档，guid 是 `db$<表名>`：根上每个键是一行（一个 Y.Map），
+//! - 工作区的“数据库”每张表一篇 Yjs 文档，服务端的文档 id 是 `db$<工作区 id>$<表名>`：根上每个键是一行（一个 Y.Map），
 //!   键就是这一行的主键；删掉的行只留主键，另加 `$$DELETED: true`。见
 //!   `packages/common/infra/src/orm/core/adapters/yjs/table.ts` 和
 //!   `packages/frontend/core/src/modules/db/schema/schema.ts`。
@@ -242,9 +242,11 @@ pub fn set_workspace_name(root: &Doc, name: &str) {
 /// 删掉的行带的标记。
 const DELETED: &str = "$$DELETED";
 
-/// 表 `name` 存在哪篇 Yjs 文档里（文档的 guid）。
-pub fn table_doc_id(name: &str) -> String {
-    format!("db${name}")
+/// 工作区 `workspace_id` 的表 `name` 存在哪篇 Yjs 文档里：服务端的文档 id 是
+/// `db$<工作区 id>$<表名>`。只写 `db$<表名>` 时 AFFiNE 0.27.5 读报 `DOC_ACTION_DENIED`、写报
+/// `ACCESS_DENIED`（A3a 对着 Docker 里的 0.27.5-beta.3 核对的）。
+pub fn table_doc_id(workspace_id: &str, name: &str) -> String {
+    format!("db${workspace_id}${name}")
 }
 
 /// 表里的一行。
