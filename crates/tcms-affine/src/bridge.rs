@@ -114,6 +114,9 @@ pub struct SyncReport {
     /// 配了远端时，拉和推的结果。
     pub remote: Option<RemoteReport>,
     pub commits: Vec<String>,
+    /// 提议显示成的评论这次做了什么（命令行的 `sync`、`resolve` 同步完接着看一遍，[`crate::comments`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comments: Option<crate::comments::CommentReport>,
 }
 
 impl SyncReport {

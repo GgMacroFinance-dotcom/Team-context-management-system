@@ -9,15 +9,17 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use affine_sync_client::{Client, Config, Credentials, Intent, SyncConnection};
+use affine_sync_client::{
+    Client, Config, Credentials, DocMode, Intent, Span, SyncConnection, comment_spans, comment_text,
+};
 use tcms_affine::workspace::{self, DocMeta, NodeKind};
 use tcms_affine::{
-    Context, FollowEnv, FollowEvent, FollowLink, FollowOptions, Job, RandomIds, Section, Server,
-    follow, link, split, sync, to_blocks,
+    Affine, Context, FollowEnv, FollowEvent, FollowLink, FollowOptions, Job, RandomIds, Section,
+    Server, follow, link, split, sync, sync_comments, to_blocks,
 };
 use tcms_core::{ItemId, Scope};
 use tcms_git::{Author, ContextRepo, FileEdit};
-use tcms_store::Store;
+use tcms_store::{Action, NewProposal, NewToken, Proposed, Store};
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
 
@@ -274,6 +276,7 @@ async fn follow_a_real_affine() {
         remote: None,
         author: Author::default(),
         link: FollowLink::default(),
+        public_url: None,
     };
     let ms = Duration::from_millis;
     let opts = FollowOptions {
@@ -447,6 +450,7 @@ async fn follow_a_real_affine() {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            FollowEvent::Comments(r) => format!("comments:{r:?}"),
             FollowEvent::Failed(e) => format!("failed:{e}"),
             FollowEvent::Disconnected(r) => format!("disconnected:{r}"),
             FollowEvent::Reconnected => "reconnected".to_owned(),
@@ -467,4 +471,145 @@ async fn follow_a_real_affine() {
         "{log:?}"
     );
     store.drop_schema().await.unwrap();
+}
+
+/// 提议显示成评论：发评论（带审核页的链接），记下人的回复，拒绝以后回复结果、标成已解决。
+#[tokio::test]
+async fn comments_on_a_real_affine() {
+    let Some((config, url)) = config() else {
+        eprintln!(
+            "没设 AFFINE_TEST_URL、AFFINE_TEST_EMAIL、AFFINE_TEST_PASSWORD、TCMS_TEST_DATABASE_URL，跳过"
+        );
+        return;
+    };
+    let schema = format!(
+        "tcms_test_{}",
+        ItemId::generate().as_str()[4..].to_lowercase()
+    );
+    let store = Store::connect(&url, &schema).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = ContextRepo::init(dir.path()).unwrap();
+    let text = format!(
+        "# 数据源\n\n## CPI 从哪里取\n<!-- ctx id={A} kind=fact -->\n\nCPI 用国家统计局的数。\n"
+    );
+    repo.commit(
+        &[FileEdit {
+            path: PATH.to_owned(),
+            content: Some(text.into_bytes()),
+        }],
+        "第一版",
+        &Author::default(),
+    )
+    .unwrap();
+    tcms_index::reindex(&repo, &store, false).await.unwrap();
+
+    let mut server = Server::connect(config).await.unwrap();
+    let ws = server.create_workspace("TCMS 评论测试").await.unwrap();
+    let author = Author::default();
+    let cx = Context {
+        repo: &repo,
+        store: &store,
+        workspace: &ws,
+        actor: "测试",
+        remote: None,
+        author: &author,
+    };
+    let scope: Scope = "role:macro".parse().unwrap();
+    let r = link(&cx, &mut server, &scope, None).await.unwrap();
+    let doc_id = r.docs[0].doc_id.clone().unwrap();
+    eprintln!("工作区 {ws}，文档 {doc_id}");
+
+    let (_, secret) = store
+        .create_token(
+            &NewToken {
+                name: "宏观研究员".to_owned(),
+                role: "macro".to_owned(),
+                team: None,
+                projects: Vec::new(),
+                expires_in_days: None,
+            },
+            "测试",
+        )
+        .await
+        .unwrap();
+    let who = store.identify(&secret).await.unwrap().unwrap();
+    let p = NewProposal {
+        action: Action::Update,
+        item_id: Some(A.to_owned()),
+        base_revision: Some(store.get_item(A).await.unwrap().unwrap().revision),
+        scope: "role:macro".to_owned(),
+        kind: "fact".to_owned(),
+        title: "CPI 从哪里取".to_owned(),
+        body: "CPI 用季调后的数。".to_owned(),
+        tags: Vec::new(),
+        review_by: None,
+        reason: "统计局开始公布季调后的 CPI".to_owned(),
+        evidence: Vec::new(),
+        conflicts: serde_json::json!([]),
+        content_hash: "comments_on_a_real_affine".to_owned(),
+        redacted: 0,
+    };
+    let Proposed::New(row) = store.create_proposal(&who, &p, 10).await.unwrap() else {
+        panic!("没建成提议");
+    };
+    let review = "http://127.0.0.1:8080";
+    let r = sync_comments(&store, &mut server, &ws, Some(review))
+        .await
+        .unwrap();
+    assert_eq!(r.posted, std::slice::from_ref(&row.id), "{r:?}");
+    let listed = server.comments(&ws, &doc_id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    let c = &listed[0];
+    assert!(
+        comment_text(&c.content).starts_with(
+            "宏观研究员（岗位 macro）提议修改「CPI 从哪里取」。\n理由：统计局开始公布季调后的 CPI\n"
+        ),
+        "{}",
+        comment_text(&c.content)
+    );
+    let raw = serde_json::to_string(&c.content).unwrap();
+    assert!(
+        raw.contains(&format!("{review}/review#/proposals/{}", row.id)),
+        "{raw}"
+    );
+    assert!(!c.resolved);
+
+    // 人在 AFFiNE 里回复（同一个账号，从客户端直接发）。
+    let content = comment_spans(&[vec![Span::Text("季调的数从哪里下？")]], None).unwrap();
+    server
+        .client()
+        .create_reply(&c.id, "数据源", DocMode::Page, content)
+        .await
+        .unwrap();
+    let r = sync_comments(&store, &mut server, &ws, Some(review))
+        .await
+        .unwrap();
+    assert_eq!(r.replies, std::slice::from_ref(&row.id), "{r:?}");
+    let saved = store.affine_comment(&row.id).await.unwrap().unwrap();
+    assert_eq!(saved.replies[0]["text"], "季调的数从哪里下？");
+    assert!(
+        saved.replies[0]["at"]
+            .as_str()
+            .is_some_and(|a| !a.is_empty())
+    );
+
+    tcms_write::reject(&store, &row.id, "王审核（tok_01TEST）", Some("先不改"))
+        .await
+        .unwrap();
+    let r = sync_comments(&store, &mut server, &ws, Some(review))
+        .await
+        .unwrap();
+    assert_eq!(r.closed, std::slice::from_ref(&row.id), "{r:?}");
+    let listed = server.comments(&ws, &doc_id).await.unwrap();
+    let c = &listed[0];
+    assert!(c.resolved);
+    let replies: Vec<String> = c.replies.iter().map(|r| comment_text(&r.content)).collect();
+    assert_eq!(replies, ["季调的数从哪里下？", "已拒绝（王审核）：先不改"]);
+    let saved = store.affine_comment(&row.id).await.unwrap().unwrap();
+    assert!(saved.closed);
+    assert_eq!(saved.replies.as_array().unwrap().len(), 1);
+    let r = sync_comments(&store, &mut server, &ws, Some(review))
+        .await
+        .unwrap();
+    assert!(r.is_empty(), "{r:?}");
 }

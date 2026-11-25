@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 
-use affine_sync_client::{Client, Config, Error as ClientError, Intent, SyncConnection, SyncEvent};
-use serde_json::json;
+use affine_sync_client::{
+    Client, Comment, Config, DocMode, Error as ClientError, Intent, SyncConnection, SyncEvent,
+};
+use serde_json::{Value, json};
 use yrs::{Doc, ReadTxn, StateVector, Transact};
 
 /// AFFiNE 那边推来的事（一直跟着同步时用，[`crate::follow`]）。
@@ -40,6 +42,29 @@ pub trait Affine {
 
     /// 最近改过的文档是谁最后改的：文档 id → 这个人在 AFFiNE 里的名字。拿不到的不在里面。
     async fn editors(&mut self, workspace: &str) -> Result<HashMap<String, String>, ClientError>;
+
+    /// 一篇文档上的评论，带回复（提议显示成评论，[`crate::comments`]）。
+    async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError>;
+
+    /// 在一篇文档上发一条评论（`content` 用 `affine_sync_client::comment_spans` 做），返回评论的 id。
+    async fn create_comment(
+        &mut self,
+        workspace: &str,
+        doc: &str,
+        doc_title: &str,
+        content: Value,
+    ) -> Result<String, ClientError>;
+
+    /// 回复一条评论。
+    async fn reply(
+        &mut self,
+        comment_id: &str,
+        doc_title: &str,
+        content: Value,
+    ) -> Result<(), ClientError>;
+
+    /// 把评论标成已解决。
+    async fn resolve_comment(&mut self, comment_id: &str) -> Result<(), ClientError>;
 
     /// 要收这几篇文档的修改（取过的已经在收了；新建的要说一下）。
     async fn watch(&mut self, workspace: &str, docs: &[String]) -> Result<(), ClientError> {
@@ -144,6 +169,40 @@ impl Affine for Server {
                 Some((d.id, (*name).to_owned()))
             })
             .collect())
+    }
+
+    async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
+        self.client.comments(workspace, doc).await
+    }
+
+    async fn create_comment(
+        &mut self,
+        workspace: &str,
+        doc: &str,
+        doc_title: &str,
+        content: Value,
+    ) -> Result<String, ClientError> {
+        let c = self
+            .client
+            .create_comment(workspace, doc, doc_title, DocMode::Page, content)
+            .await?;
+        Ok(c.id)
+    }
+
+    async fn reply(
+        &mut self,
+        comment_id: &str,
+        doc_title: &str,
+        content: Value,
+    ) -> Result<(), ClientError> {
+        self.client
+            .create_reply(comment_id, doc_title, DocMode::Page, content)
+            .await?;
+        Ok(())
+    }
+
+    async fn resolve_comment(&mut self, comment_id: &str) -> Result<(), ClientError> {
+        self.client.resolve_comment(comment_id, true).await
     }
 
     async fn watch(&mut self, workspace: &str, docs: &[String]) -> Result<(), ClientError> {

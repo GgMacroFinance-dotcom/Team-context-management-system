@@ -324,8 +324,26 @@
       }
     }
 
+    if (d.affine) parts.push(h("h2", {}, "AFFiNE 里的评论"), affineComment(d.affine, open));
+
     if (open) parts.push(h("h2", {}, "处理"), decide(d, gone, status), status);
     render(...parts);
+  }
+
+  // 提议在 AFFiNE 里显示成的评论：发在哪篇上、现在怎么样了、人在那里的回复。
+  function affineComment(c, open) {
+    const state = !c.closed
+      ? (open ? "批准、拒绝以后，在评论里回复结果并标成已解决。" : "下次和 AFFiNE 同步时回复结果、标成已解决。")
+      : (open ? "评论在 AFFiNE 里被删了。" : "已经回复了结果，标成了已解决。");
+    const when = (at) => (at || "").replace("T", " ").replace(/\.\d+Z$|Z$/, "") + " UTC";
+    const replies = c.replies.length
+      ? h("ul", { class: "list replies" }, c.replies.map((r) => h("li", {}, h("div", { class: "row" },
+        h("div", { class: "meta" }, `${r.user || "-"} 回复于 ${when(r.at)}`),
+        h("div", { class: "reply" }, r.text)))))
+      : h("p", { class: "muted" }, "还没有人在 AFFiNE 里回复。");
+    return h("div", { class: "panel", id: "affine-comment" },
+      h("p", {}, `发在 AFFiNE 的「${c.path}」上（文档右边栏的“评论”里）。${state}`),
+      replies);
   }
 
   // 接受、改了再接受、拒绝。

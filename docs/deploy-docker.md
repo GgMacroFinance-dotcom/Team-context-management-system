@@ -38,6 +38,7 @@ docker build -t tcms .
 | `TCMS_WEBHOOK_SECRET` | 可选，远端推送通知（webhook）的密钥，至少 16 个字符。配了以后人推上去马上同步，见“推上去马上同步” |
 | `TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD` | 可选，和 AFFiNE 同步时连的 AFFiNE 地址和给本系统建的专门账号（`docs/affine-sync.md` 7.3）。自托管用自己的 CA 时另外挂一个 PEM 文件、设 `TCMS_AFFINE_CA` |
 | `TCMS_AFFINE_WORKSPACE` | 可选，AFFiNE 工作区 id（`tcms affine init` 建）。设了以后服务一直跟着和 AFFiNE 同步，连不上 AFFiNE 不影响别的（`docs/affine-sync.md` 7.4） |
+| `TCMS_PUBLIC_URL` | 可选，审核页对外的地址，比如 `https://ctx.example.com`。agent 的提议在 AFFiNE 里显示成评论时，评论里链到审核页的这条提议；没设时评论里写提议 id（`docs/affine-sync.md` 7.6） |
 
 ## 单独部署
 

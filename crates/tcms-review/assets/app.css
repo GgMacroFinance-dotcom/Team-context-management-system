@@ -177,3 +177,6 @@ ul.hints { margin: 8px 0 0; padding-left: 18px; }
 .affine-paused .actions { align-items: center; }
 /* 只列出来、点不进去的行（接上的文档、最近的）。 */
 .list div.row { padding: 10px 4px; }
+/* 提议在 AFFiNE 里的评论：人在那里的回复。 */
+#affine-comment > p:first-child { margin-top: 0; }
+.replies .reply { white-space: pre-wrap; margin-top: 2px; }

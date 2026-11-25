@@ -21,7 +21,8 @@ pub mod sync;
 
 pub use client::{Client, Config, Credentials, ServerInfo};
 pub use graphql::{
-    Comment, CommentChange, DocInfo, DocMode, Page, WorkspaceInfo, comment_content, comment_text,
+    Comment, CommentChange, DocInfo, DocMode, Page, Span, WorkspaceInfo, comment_content,
+    comment_spans, comment_text,
 };
 pub use net::Endpoint;
 pub use replica::{DocSync, FollowUp, Remote, Replica, SyncReport};

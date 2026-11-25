@@ -17,7 +17,8 @@ use tcms_git::{Author, ContextRepo, FileEdit, Remote};
 use tcms_mcp::{HttpOptions, Live};
 use tcms_review::{ReviewOptions, Writer, router};
 use tcms_store::{
-    AffineBase, AffineConflict, AffineDoc, AffineSave, AffineScope, Identity, NewToken, Store,
+    AffineBase, AffineComment, AffineConflict, AffineDoc, AffineSave, AffineScope, Identity,
+    NewToken, Store,
 };
 use tcms_write::{ProposeArgs, propose};
 use tower::ServiceExt;
@@ -1742,4 +1743,37 @@ async fn affine_sync_page() {
     assert_eq!(v["recent"].as_array().unwrap().len(), 3);
 
     f.store.drop_schema().await.unwrap();
+}
+
+/// 提议在 AFFiNE 里显示成评论以后，提议的详情里带上发在哪篇上、人在 AFFiNE 里的回复。
+#[tokio::test]
+async fn proposal_shows_affine_comment() {
+    let Some(f) = fixture().await else { return };
+    let id = agent_proposes(&f, json!({"action": "update", "item_id": MACRO, "draft": {"body": "CPI 用季调后的数。"}, "reason": "统计局开始公布季调的"})).await;
+    let d = get(&f, &format!("/api/proposals/{id}")).await;
+    assert!(d["affine"].is_null(), "{d}");
+
+    f.store
+        .add_affine_comment(&AffineComment {
+            proposal_id: id.clone(),
+            workspace_id: WS.to_owned(),
+            doc_id: "doc-src".to_owned(),
+            path: "role-macro/数据源.md".to_owned(),
+            comment_id: "comment-1".to_owned(),
+            closed: false,
+            replies: json!([]),
+            created_at: String::new(),
+        })
+        .await
+        .unwrap();
+    let replies = json!([{"id": "r1", "user": "小李", "text": "季调的数从哪里下？", "at": "2026-11-25T09:00:00.000Z"}]);
+    f.store
+        .set_affine_comment_replies(&id, &replies)
+        .await
+        .unwrap();
+    let d = get(&f, &format!("/api/proposals/{id}")).await;
+    assert_eq!(
+        d["affine"],
+        json!({"path": "role-macro/数据源.md", "doc_id": "doc-src", "closed": false, "replies": replies})
+    );
 }

@@ -11,16 +11,18 @@ use std::process::Command;
 use std::rc::Rc;
 use std::time::Duration;
 
-use affine_sync_client::Error as ClientError;
+use affine_sync_client::{Comment, Error as ClientError, Span, comment_spans, comment_text};
+use serde_json::{Value, json};
 use tcms_affine::workspace::{self, NodeKind};
 use tcms_affine::{
     Affine, Context, Event, FollowEnv, FollowEvent, FollowLink, FollowOptions, Job, Keep,
-    RandomIds, Section, SyncReport, follow, link, resolve, split, status, sync, to_blocks,
-    to_markdown,
+    RandomIds, Section, SyncReport, follow, link, resolve, split, status, sync, sync_comments,
+    to_blocks, to_markdown,
 };
 use tcms_core::{ItemId, Scope};
 use tcms_git::{Author, ContextRepo, FileEdit};
-use tcms_store::Store;
+use tcms_store::{Action, Identity, NewProposal, NewToken, Proposed, Store};
+use tcms_write::AcceptOptions;
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
 
@@ -35,6 +37,12 @@ const D: &str = "ctx_01JDX4M6Q8DDDDDDDDDDDDDDDD";
 struct Memory {
     docs: HashMap<String, Doc>,
     pushes: usize,
+    /// 评论：文档 id → 这篇上的评论（回复在 `replies` 里）。
+    comments: HashMap<String, Vec<Comment>>,
+    /// 发出去的评论、回复一共几条（id 用它编）。
+    comment_count: usize,
+    /// 模拟标成已解决时出错。
+    fail_resolve: bool,
 }
 
 impl Memory {
@@ -120,6 +128,51 @@ impl Memory {
             .map(|k| (k.clone(), "小王".to_owned()))
             .collect()
     }
+
+    fn new_comment(&mut self, user: &str, content: Value) -> Comment {
+        self.comment_count += 1;
+        Comment {
+            id: format!("comment-{}", self.comment_count),
+            content,
+            resolved: false,
+            user_id: user.to_owned(),
+            user_name: user.to_owned(),
+            created_at: format!("2026-11-25T00:00:{:02}Z", self.comment_count),
+            updated_at: String::new(),
+            replies: Vec::new(),
+        }
+    }
+
+    fn comment_mut(&mut self, id: &str) -> Result<&mut Comment, ClientError> {
+        self.comments
+            .values_mut()
+            .flatten()
+            .find(|c| c.id == id)
+            .ok_or_else(|| ClientError::Protocol(format!("没有评论 {id}")))
+    }
+
+    fn create_comment_now(&mut self, doc: &str, content: Value) -> String {
+        let c = self.new_comment("tcms", content);
+        let id = c.id.clone();
+        self.comments.entry(doc.to_owned()).or_default().push(c);
+        id
+    }
+
+    fn reply_now(&mut self, comment_id: &str, user: &str, text: &str) -> Result<(), ClientError> {
+        let content = comment_spans(&[vec![Span::Text(text)]], None).unwrap();
+        let r = self.new_comment(user, content);
+        self.comment_mut(comment_id)?.replies.push(r);
+        Ok(())
+    }
+
+    /// 一篇文档上的评论（只有一条时用）：（评论的字，回复的字，标成已解决了没有）。
+    fn comment_on(&self, doc: &str) -> (String, Vec<String>, bool) {
+        let list = &self.comments[doc];
+        assert_eq!(list.len(), 1, "{list:?}");
+        let c = &list[0];
+        let replies = c.replies.iter().map(|r| comment_text(&r.content)).collect();
+        (comment_text(&c.content), replies, c.resolved)
+    }
 }
 
 impl Affine for Memory {
@@ -145,6 +198,32 @@ impl Affine for Memory {
 
     async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
         Ok(self.editors_now())
+    }
+
+    async fn comments(&mut self, _ws: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
+        Ok(self.comments.get(doc).cloned().unwrap_or_default())
+    }
+
+    async fn create_comment(
+        &mut self,
+        _ws: &str,
+        doc: &str,
+        _title: &str,
+        content: Value,
+    ) -> Result<String, ClientError> {
+        Ok(self.create_comment_now(doc, content))
+    }
+
+    async fn reply(&mut self, id: &str, _title: &str, content: Value) -> Result<(), ClientError> {
+        self.reply_now(id, "tcms", &comment_text(&content))
+    }
+
+    async fn resolve_comment(&mut self, id: &str) -> Result<(), ClientError> {
+        if self.fail_resolve {
+            return Err(ClientError::Protocol("假的出错".to_owned()));
+        }
+        self.comment_mut(id)?.resolved = true;
+        Ok(())
     }
 }
 
@@ -177,6 +256,37 @@ impl Affine for Shared {
 
     async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
         Ok(self.mem.borrow().editors_now())
+    }
+
+    async fn comments(&mut self, _ws: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
+        Ok(self
+            .mem
+            .borrow()
+            .comments
+            .get(doc)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn create_comment(
+        &mut self,
+        _ws: &str,
+        doc: &str,
+        _title: &str,
+        content: Value,
+    ) -> Result<String, ClientError> {
+        Ok(self.mem.borrow_mut().create_comment_now(doc, content))
+    }
+
+    async fn reply(&mut self, id: &str, _title: &str, content: Value) -> Result<(), ClientError> {
+        self.mem
+            .borrow_mut()
+            .reply_now(id, "tcms", &comment_text(&content))
+    }
+
+    async fn resolve_comment(&mut self, id: &str) -> Result<(), ClientError> {
+        self.mem.borrow_mut().comment_mut(id)?.resolved = true;
+        Ok(())
     }
 
     async fn next_event(&mut self) -> Event {
@@ -699,6 +809,253 @@ async fn readonly_items_and_whole_scope() {
     );
 }
 
+/// 发一个 agent 的令牌，换成它背后的身份。
+async fn agent(store: &Store) -> Identity {
+    let (_, secret) = store
+        .create_token(
+            &NewToken {
+                name: "宏观研究员".to_owned(),
+                role: "macro".to_owned(),
+                team: Some("research".to_owned()),
+                projects: Vec::new(),
+                expires_in_days: None,
+            },
+            "测试",
+        )
+        .await
+        .unwrap();
+    store.identify(&secret).await.unwrap().unwrap()
+}
+
+/// 直接存一条提议（不走检查），返回 id。正文和证据不该出现在评论里。
+async fn proposal(
+    f: &Fixture,
+    who: &Identity,
+    action: Action,
+    item: Option<&str>,
+    title: &str,
+    reason: &str,
+) -> String {
+    let base_revision = match item {
+        Some(id) => Some(f.store.get_item(id).await.unwrap().unwrap().revision),
+        None => None,
+    };
+    let p = NewProposal {
+        action,
+        item_id: item.map(str::to_owned),
+        base_revision,
+        scope: "role:macro".to_owned(),
+        kind: "fact".to_owned(),
+        title: title.to_owned(),
+        body: "提议的正文不进评论。".to_owned(),
+        tags: Vec::new(),
+        review_by: None,
+        reason: reason.to_owned(),
+        evidence: vec!["https://chat.example.com/对话/1".to_owned()],
+        conflicts: json!([]),
+        content_hash: format!("{action}{item:?}{title}"),
+        redacted: 0,
+    };
+    match f.store.create_proposal(who, &p, 50).await.unwrap() {
+        Proposed::New(row) => row.id,
+        other => panic!("没建成：{other:?}"),
+    }
+}
+
+fn accept_options() -> AcceptOptions {
+    AcceptOptions {
+        actor: "王审核（tok_01TEST）".to_owned(),
+        author: Author::default(),
+        title: None,
+        body: None,
+        file: None,
+        over_revision: None,
+        note: None,
+        remote: None,
+    }
+}
+
+const REVIEW: &str = "https://ctx.example.com/";
+
+/// 提议显示成评论：目标接上了的发评论（不放正文、证据），发过的不再发；人在 AFFiNE 里的回复记下来；
+/// 批准、拒绝以后回复结果、标成已解决；目标后来才接上的，接上以后再发；评论在 AFFiNE 里删了的不再管。
+#[tokio::test]
+async fn proposals_show_as_comments() {
+    let Some((f, mut affine)) = linked().await else {
+        return;
+    };
+    let macro_doc = affine.page_id("数据源");
+    let table_doc = affine.page_id("表格");
+    let who = agent(&f.store).await;
+    let long_reason = "统计局从 2026 年起公布季调后的 CPI。".repeat(20);
+    let update = proposal(
+        &f,
+        &who,
+        Action::Update,
+        Some(A),
+        "CPI 从哪里取（季调）",
+        &long_reason,
+    )
+    .await;
+    let archive = proposal(&f, &who, Action::Archive, Some(C), "口径表", "表格过时了").await;
+    // 新建的默认写进 role-macro/事实.md，这个文件还没有。
+    let create = proposal(&f, &who, Action::Create, None, "PPI 的口径", "新加一条").await;
+
+    let r = sync_comments(&f.store, &mut affine, WS, Some(REVIEW))
+        .await
+        .unwrap();
+    assert_eq!(r.posted, [update.clone(), archive.clone()], "{r:?}");
+    assert!(r.errors.is_empty(), "{r:?}");
+    let (text, replies, resolved) = affine.comment_on(&macro_doc);
+    let reason_start: String = long_reason.chars().take(200).collect();
+    assert_eq!(
+        text,
+        format!(
+            "宏观研究员（岗位 macro）提议修改「CPI 从哪里取」，标题改成「CPI 从哪里取（季调）」。\n理由：{reason_start}…\n批准、拒绝在审核页：打开这条提议。在这里回复的，审核页里看得到。"
+        )
+    );
+    assert!(replies.is_empty() && !resolved);
+    let raw = serde_json::to_string(&affine.comments[&macro_doc][0].content).unwrap();
+    assert!(raw.contains(&format!(
+        "https://ctx.example.com/review#/proposals/{update}"
+    )));
+    assert!(raw.contains(r#""preview":"CPI 从哪里取""#), "{raw}");
+    assert!(!raw.contains("正文不进评论") && !raw.contains("chat.example.com"));
+    let (text, _, _) = affine.comment_on(&table_doc);
+    assert!(text.starts_with("宏观研究员（岗位 macro）提议归档「口径表」。\n理由：表格过时了\n"));
+    let row = f.store.affine_comment(&update).await.unwrap().unwrap();
+    assert_eq!(
+        (row.doc_id.as_str(), row.path.as_str()),
+        (macro_doc.as_str(), MACRO)
+    );
+    assert!(!row.closed);
+
+    // 再看一遍：什么都不用做。
+    let r = sync_comments(&f.store, &mut affine, WS, Some(REVIEW))
+        .await
+        .unwrap();
+    assert!(r.is_empty(), "{r:?}");
+
+    // 人在 AFFiNE 里回复了：记下来。
+    let comment = row.comment_id.clone();
+    affine
+        .reply_now(&comment, "小李", "季调的数从哪里下？")
+        .unwrap();
+    let r = sync_comments(&f.store, &mut affine, WS, Some(REVIEW))
+        .await
+        .unwrap();
+    assert_eq!(r.replies, std::slice::from_ref(&update), "{r:?}");
+    let row = f.store.affine_comment(&update).await.unwrap().unwrap();
+    assert_eq!(row.replies.as_array().unwrap().len(), 1);
+    assert_eq!(row.replies[0]["user"], "小李");
+    assert_eq!(row.replies[0]["text"], "季调的数从哪里下？");
+
+    // 拒绝一条、批准一条：回复结果，标成已解决。
+    tcms_write::reject(&f.store, &update, "王审核（tok_01TEST）", Some("先不改"))
+        .await
+        .unwrap();
+    let accepted = tcms_write::accept(&f.repo, &f.store, &archive, &accept_options())
+        .await
+        .unwrap();
+    let r = sync_comments(&f.store, &mut affine, WS, Some(REVIEW))
+        .await
+        .unwrap();
+    let mut closed = r.closed.clone();
+    closed.sort();
+    let mut want = vec![update.clone(), archive.clone()];
+    want.sort();
+    assert_eq!(closed, want, "{r:?}");
+    let (_, replies, resolved) = affine.comment_on(&macro_doc);
+    assert_eq!(replies, ["季调的数从哪里下？", "已拒绝（王审核）：先不改"]);
+    assert!(resolved);
+    let (_, replies, resolved) = affine.comment_on(&table_doc);
+    let commit = &accepted.commit[..12];
+    assert_eq!(
+        replies,
+        [format!(
+            "已接受（王审核），写进了上下文仓库，提交 {commit}。"
+        )]
+    );
+    assert!(resolved);
+    // 自己回复的结果不算人的回复。
+    let row = f.store.affine_comment(&update).await.unwrap().unwrap();
+    assert!(row.closed);
+    assert_eq!(row.replies.as_array().unwrap().len(), 1);
+
+    // 新建的目标文件后来有了（整个范围接上了，同步时接上）：接上以后发评论。
+    f.git_commit(&[put(
+        "role-macro/事实.md",
+        &format!("## 别的事实\n<!-- ctx id={D} -->\n\n一条。\n"),
+    )])
+    .await;
+    f.sync(&mut affine, &[]).await;
+    let fact_doc = affine.page_id("事实");
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert_eq!(r.posted, std::slice::from_ref(&create), "{r:?}");
+    let (text, _, _) = affine.comment_on(&fact_doc);
+    assert_eq!(
+        text,
+        format!(
+            "宏观研究员（岗位 macro）提议在这篇里新加一条「PPI 的口径」。\n理由：新加一条\n批准、拒绝在审核页的“待审核的提议”里（{create}）。在这里回复的，审核页里看得到。"
+        )
+    );
+
+    // 人在 AFFiNE 里把评论删了：不再管，也不再发。
+    affine.comments.get_mut(&fact_doc).unwrap().clear();
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert_eq!(r.gone, std::slice::from_ref(&create), "{r:?}");
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert!(r.is_empty(), "{r:?}");
+    assert!(affine.comments[&fact_doc].is_empty());
+}
+
+/// 回复了结果、标成已解决时出错：记下错，下次只标成已解决，不再回复一遍。
+#[tokio::test]
+async fn comment_outcomes_are_said_once() {
+    let Some((f, mut affine)) = linked().await else {
+        return;
+    };
+    let macro_doc = affine.page_id("数据源");
+    let who = agent(&f.store).await;
+    let id = proposal(&f, &who, Action::Update, Some(B), "PMI", "只用统计局的").await;
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert_eq!(r.posted, std::slice::from_ref(&id));
+    tcms_write::reject(&f.store, &id, "cli", None)
+        .await
+        .unwrap();
+
+    affine.fail_resolve = true;
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert!(r.closed.is_empty(), "{r:?}");
+    assert_eq!(r.errors.len(), 1, "{r:?}");
+    assert!(r.errors[0].contains("假的出错"), "{r:?}");
+    let (_, replies, resolved) = affine.comment_on(&macro_doc);
+    assert_eq!(replies, ["已拒绝（cli）。"]);
+    assert!(!resolved);
+
+    affine.fail_resolve = false;
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert_eq!(r.closed, std::slice::from_ref(&id), "{r:?}");
+    let (_, replies, resolved) = affine.comment_on(&macro_doc);
+    assert_eq!(replies, ["已拒绝（cli）。"]);
+    assert!(resolved);
+    let row = f.store.affine_comment(&id).await.unwrap().unwrap();
+    assert!(row.closed);
+    assert_eq!(row.replies, json!([]));
+}
+
 /// AFFiNE 0.27.5 网页版的客户端 id 超过 32 位（2026-11-24 在网页编辑器里打字，看到的是 50 位的）。
 /// 这段更新是 yjs 13.6.21 用客户端 id 710053731018286 写的：插进“## 标题”，再删掉“## ”（网页里打 `## ` 变成标题就是这样）。
 /// yrs 开了 small-client 时块里的 id 和删除集合里的 id 截得不一样，读出来还是“## 标题”。
@@ -738,6 +1095,14 @@ fn describe(ev: &FollowEvent<'_>) -> String {
             };
             format!("{kind}:{}", changed.join(","))
         }
+        FollowEvent::Comments(r) => format!(
+            "comments:posted {} closed {} gone {} replies {} errors {}",
+            r.posted.len(),
+            r.closed.len(),
+            r.gone.len(),
+            r.replies.len(),
+            r.errors.len()
+        ),
         FollowEvent::Failed(e) => format!("failed:{e}"),
         FollowEvent::Disconnected(r) => format!("disconnected:{r}"),
         FollowEvent::Reconnected => "reconnected".to_owned(),
@@ -773,6 +1138,7 @@ async fn follow_syncs_both_ways_without_holding_the_lock() {
         remote: None,
         author: Author::default(),
         link: FollowLink::default(),
+        public_url: None,
     };
     let ms = Duration::from_millis;
     let opts = FollowOptions {
@@ -888,6 +1254,7 @@ async fn follow_takes_requests_from_the_review_page() {
         remote: None,
         author: Author::default(),
         link: link.clone(),
+        public_url: None,
     };
     // 不看 git、不定时全部看：只有第一次和审核页叫的时候同步。
     let opts = FollowOptions {
@@ -945,4 +1312,81 @@ async fn follow_takes_requests_from_the_review_page() {
     .await
     .expect("跟着同步没停下来");
     assert_eq!(log.borrow().len(), 3, "{:?}", log.borrow());
+}
+
+/// 跟着同步时，提议一存进来（`NOTIFY tcms_proposals`）几秒内发评论，拒绝了几秒内回复结果、标成已解决；
+/// 不用等每 5 分钟全部看一遍。
+#[tokio::test]
+async fn follow_posts_comments_soon_after_proposals() {
+    let Some((f, affine)) = linked().await else {
+        return;
+    };
+    let doc_id = affine.page_id("数据源");
+    let mem = Rc::new(RefCell::new(affine));
+    let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut shared = Shared {
+        mem: mem.clone(),
+        events: rx,
+    };
+    let env = FollowEnv {
+        repo: f.path().to_path_buf(),
+        store: f.store.clone(),
+        workspace: WS.to_owned(),
+        actor: "测试".to_owned(),
+        remote: None,
+        author: Author::default(),
+        link: FollowLink::default(),
+        public_url: Some("https://ctx.example.com".to_owned()),
+    };
+    let opts = FollowOptions {
+        quiet: Duration::from_millis(200),
+        max_wait: Duration::from_secs(2),
+        git_poll: Duration::from_secs(600),
+        full_every: Duration::from_secs(600),
+        retry: Duration::from_millis(200),
+    };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let log: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let comment_on = |doc: &str| mem.borrow().comments.get(doc).map(|l| l.len()).unwrap_or(0);
+
+    let script = async {
+        wait_for("第一次同步", || !log.borrow().is_empty()).await;
+        let who = agent(&f.store).await;
+        let id = proposal(&f, &who, Action::Update, Some(B), "PMI", "只用统计局的").await;
+        wait_for("发评论", || comment_on(&doc_id) == 1).await;
+        let (text, _, _) = mem.borrow().comment_on(&doc_id);
+        assert!(
+            text.starts_with("宏观研究员（岗位 macro）提议修改「PMI」。"),
+            "{text}"
+        );
+        let raw = serde_json::to_string(&mem.borrow().comments[&doc_id][0].content).unwrap();
+        assert!(raw.contains(&format!("https://ctx.example.com/review#/proposals/{id}")));
+
+        tcms_write::reject(&f.store, &id, "王审核（tok_01TEST）", Some("再看看"))
+            .await
+            .unwrap();
+        wait_for("回复结果、标成已解决", || {
+            mem.borrow().comment_on(&doc_id).2
+        })
+        .await;
+        let (_, replies, _) = mem.borrow().comment_on(&doc_id);
+        assert_eq!(replies, ["已拒绝（王审核）：再看看"]);
+        stop.send(true).unwrap();
+    };
+    let follower = follow(&env, &mut shared, opts, stopped, |ev| {
+        log.borrow_mut().push(describe(&ev))
+    });
+    tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(follower, script);
+    })
+    .await
+    .expect("跟着同步没停下来");
+    assert_eq!(
+        *log.borrow(),
+        [
+            "full:",
+            "comments:posted 1 closed 0 gone 0 replies 0 errors 0",
+            "comments:posted 0 closed 1 gone 0 replies 0 errors 0",
+        ]
+    );
 }

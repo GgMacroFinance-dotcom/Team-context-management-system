@@ -13,7 +13,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use tcms_affine::{
-    Context, DocReport, FollowEnv, FollowEvent, FollowLink, FollowOptions, Keep, Server, SyncReport,
+    CommentReport, Context, DocReport, FollowEnv, FollowEvent, FollowLink, FollowOptions, Keep,
+    Server, SyncReport, sync_comments,
 };
 use tcms_core::Scope;
 use tcms_git::{Author, Remote};
@@ -132,6 +133,7 @@ pub async fn run(
             remote: remote.cloned(),
             author,
             link: FollowLink::default(),
+            public_url: public_url(),
         };
         let (stop, stopped) = watch::channel(false);
         let run = follow_forever(env, stopped);
@@ -164,7 +166,9 @@ pub async fn run(
             )
         }
         AffineCmd::Sync { resume, json } => {
-            (tcms_affine::sync(&cx, &mut server, &resume).await?, json)
+            let mut report = tcms_affine::sync(&cx, &mut server, &resume).await?;
+            report.comments = Some(comments(&cx, &mut server).await?);
+            (report, json)
         }
         AffineCmd::Resolve { id, keep, json } => {
             let keep = match keep {
@@ -175,7 +179,9 @@ pub async fn run(
             if !json {
                 println!("第 {id} 条（{path}）处理了，接着同步一次。");
             }
-            (tcms_affine::sync(&cx, &mut server, &[]).await?, json)
+            let mut report = tcms_affine::sync(&cx, &mut server, &[]).await?;
+            report.comments = Some(comments(&cx, &mut server).await?);
+            (report, json)
         }
         AffineCmd::Init { .. } | AffineCmd::Status { .. } | AffineCmd::Follow => {
             unreachable!("上面处理过")
@@ -187,6 +193,36 @@ pub async fn run(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// 同步完看一遍提议显示成的评论（`docs/affine-sync.md` 7.6）。
+async fn comments(cx: &Context<'_>, server: &mut Server) -> Result<CommentReport> {
+    let url = public_url();
+    Ok(sync_comments(cx.store, server, cx.workspace, url.as_deref()).await?)
+}
+
+/// 评论这次做了什么，一样一行；什么都没做是空的。
+fn comment_lines(r: &CommentReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut add = |what: &str, ids: &[String]| {
+        if !ids.is_empty() {
+            lines.push(format!(
+                "评论：{what} {} 条（{}）",
+                ids.len(),
+                ids.join("、")
+            ));
+        }
+    };
+    add("新发了", &r.posted);
+    add("有新回复", &r.replies);
+    add("回复了结果、标成已解决", &r.closed);
+    add("在 AFFiNE 里被删了", &r.gone);
+    lines.extend(
+        r.errors
+            .iter()
+            .map(|e| format!("评论出错（下次再试）：{e}")),
+    );
+    lines
 }
 
 /// 一篇文档这次怎么样了：一行，停着的原因、备注各缩进一行。
@@ -259,6 +295,9 @@ fn print_report(report: &SyncReport, json: bool) -> Result<()> {
     if let Some(r) = &report.remote {
         crate::print_remote(r);
     }
+    for line in report.comments.iter().flat_map(comment_lines) {
+        println!("{line}");
+    }
     if report.needs_attention() {
         println!("有停着的文档或等人处理的条目，用 tcms affine status 看。");
     }
@@ -284,7 +323,16 @@ pub fn serve_env(
         remote: remote.cloned(),
         author,
         link: FollowLink::default(),
+        public_url: public_url(),
     })
+}
+
+/// 审核页对外的地址（`TCMS_PUBLIC_URL`，比如 `https://ctx.example.com`），写进 AFFiNE 评论里的链接。
+fn public_url() -> Option<String> {
+    std::env::var("TCMS_PUBLIC_URL")
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty())
 }
 
 /// 连上 AFFiNE（连不上隔一会儿再试，5 秒起每次翻倍，最多 5 分钟），然后一直跟着同步，直到 `stop` 变成 `true`。
@@ -328,6 +376,8 @@ struct FollowLog {
     /// 文件 → 上次写的“没接”“停着”。
     said: HashMap<String, String>,
     error: Option<String>,
+    /// 上次写的评论出的错。
+    comment_errors: String,
 }
 
 impl FollowLog {
@@ -363,6 +413,17 @@ impl FollowLog {
                         eprintln!("AFFiNE 同步：{}", r.summary());
                     }
                 }
+            }
+            FollowEvent::Comments(r) => {
+                // 同一个错一直在的话（比如一篇文档取不到评论）只写一次。
+                let errors = r.errors.join("\n");
+                for line in comment_lines(r) {
+                    if line.starts_with("评论出错") && self.comment_errors == errors {
+                        continue;
+                    }
+                    eprintln!("AFFiNE 同步：{line}");
+                }
+                self.comment_errors = errors;
             }
             FollowEvent::Failed(e) => {
                 let msg = e.to_string();

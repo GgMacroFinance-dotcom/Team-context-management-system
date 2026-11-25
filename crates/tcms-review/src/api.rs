@@ -246,8 +246,13 @@ pub(crate) async fn proposal(State(state): State<AppState>, Path(id): Path<Strin
         }
         _ => None,
     };
+    // 在 AFFiNE 里显示成的评论（`docs/affine-sync.md` 7.6）：人在那里的回复列在这里。
+    let affine = store.affine_comment(&p.id).await.map_err(store_error)?.map(
+        |c| json!({"path": c.path, "doc_id": c.doc_id, "closed": c.closed, "replies": c.replies}),
+    );
     Ok(Json(json!({
         "proposal": p,
+        "affine": affine,
         "promotion": promotion,
         "current": current.as_ref().map(item_brief),
         "stale": stale,

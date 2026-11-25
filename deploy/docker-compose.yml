@@ -51,6 +51,8 @@ services:
       TCMS_AFFINE_EMAIL: ${TCMS_AFFINE_EMAIL:-}
       TCMS_AFFINE_PASSWORD: ${TCMS_AFFINE_PASSWORD:-}
       TCMS_AFFINE_WORKSPACE: ${TCMS_AFFINE_WORKSPACE:-}
+      # 可选：审核页对外的地址，写进 AFFiNE 评论里的链接（docs/affine-sync.md 7.6）。
+      TCMS_PUBLIC_URL: ${TCMS_PUBLIC_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
