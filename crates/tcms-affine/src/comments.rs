@@ -66,17 +66,21 @@ pub async fn sync_comments(
         .filter(|d| d.workspace_id == workspace)
         .collect();
     let by_path: HashMap<&str, &AffineDoc> = docs.iter().map(|d| (d.path.as_str(), d)).collect();
-    let bases = store.affine_bases().await?;
-    let by_item: HashMap<&str, &AffineBase> =
-        bases.iter().map(|b| (b.item_id.as_str(), b)).collect();
     let comments = store.affine_comments(false).await?;
     let commented: HashSet<&str> = comments.iter().map(|c| c.proposal_id.as_str()).collect();
 
-    // 新的提议：发评论。
-    for p in store.list_proposals(Some("open")).await? {
-        if commented.contains(p.id.as_str()) {
-            continue;
-        }
+    // 新的提议：发评论。底稿只取这几条提议针对的条目的（1 万条时全部取一遍要二十几毫秒）。
+    let new: Vec<ProposalRow> = store
+        .list_proposals(Some("open"))
+        .await?
+        .into_iter()
+        .filter(|p| !commented.contains(p.id.as_str()))
+        .collect();
+    let items: Vec<String> = new.iter().filter_map(|p| p.item_id.clone()).collect();
+    let bases = store.affine_bases_of(&items).await?;
+    let by_item: HashMap<&str, &AffineBase> =
+        bases.iter().map(|b| (b.item_id.as_str(), b)).collect();
+    for p in new {
         let Some(t) = target(&p, &by_item) else {
             continue;
         };

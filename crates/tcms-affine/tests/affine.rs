@@ -205,9 +205,13 @@ async fn sync_with_a_real_affine() {
     assert!(r.commits.is_empty());
     // 服务端的这篇文档和本系统记下的一样（没有漏推的）。
     let docs = store.affine_docs().await.unwrap();
+    let states = store
+        .affine_doc_states(std::slice::from_ref(&docs[0].path))
+        .await
+        .unwrap();
     let ours = Doc::new();
     ours.transact_mut()
-        .apply_update(Update::decode_v1(&docs[0].state).unwrap())
+        .apply_update(Update::decode_v1(&states[&docs[0].path]).unwrap())
         .unwrap();
     let missing = page
         .transact()

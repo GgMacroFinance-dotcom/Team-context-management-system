@@ -50,3 +50,4 @@ jobs:
           ./target/release/tcms bench serve --check
           ./target/release/tcms bench affine-doc --check
           ./target/release/tcms bench affine --check
+          ./target/release/tcms bench affine --items 10000 --check
