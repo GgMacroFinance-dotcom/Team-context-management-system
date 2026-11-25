@@ -2,6 +2,7 @@
 //! 在里面建一个临时 schema，跑完删掉。
 
 mod affine;
+mod affine_sync;
 mod data;
 mod index;
 mod read;
@@ -56,6 +57,19 @@ pub enum What {
         #[arg(long)]
         check: bool,
     },
+    /// 和 AFFiNE 同步：第一次接上、全部看一遍、跟着同步时两边改一条各要多久、跟着同步多用的内存、
+    /// 提议显示成评论。AFFiNE 换成这个进程里的假 AFFiNE。
+    Affine {
+        /// 造多少条（每个文件 20 条，一个文件一篇文档）。
+        #[arg(long, default_value_t = 1000)]
+        items: usize,
+        /// 跟着同步时 AFFiNE 里、git 里各改几次。
+        #[arg(long, default_value_t = 30)]
+        edits: usize,
+        /// 超过门槛时以非零状态退出（CI 用）。门槛按 1 千条定，第一次接上、全部看一遍按条数比例换算。
+        #[arg(long)]
+        check: bool,
+    },
     /// AFFiNE 内核：读一篇 1 千个块的文档、合并 1 万条更新（含写进本地库）、导出整个工作区。不要数据库。
     AffineDoc {
         /// 超过门槛时以非零状态退出（CI 用）。
@@ -79,6 +93,11 @@ pub async fn run(what: What) -> Result<ExitCode> {
             budget,
             check,
         } => serve::run(items, requests, budget, check).await,
+        What::Affine {
+            items,
+            edits,
+            check,
+        } => affine_sync::run(items, edits, check).await,
         What::AffineDoc { check } => affine::run(check),
     }
 }
