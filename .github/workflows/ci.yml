@@ -48,3 +48,4 @@ jobs:
           ./target/release/tcms bench index --check
           ./target/release/tcms bench read --check
           ./target/release/tcms bench serve --check
+          ./target/release/tcms bench affine-doc --check

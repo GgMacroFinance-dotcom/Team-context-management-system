@@ -286,3 +286,26 @@ fn set_user_version(path: &std::path::Path, v: u32) {
     bytes[60..64].copy_from_slice(&v.to_be_bytes());
     std::fs::write(path, bytes).unwrap();
 }
+
+#[test]
+fn updates_that_arrive_out_of_order_are_kept() {
+    let mut store = Store::open_in_memory().unwrap();
+    let doc = Doc::new();
+    let first = type_text(&doc, "先写的");
+    let second = type_text(&doc, "后写的");
+    // 后一条先到：合不进去，原样留着
+    store.push_update("d1", &second).unwrap();
+    assert_eq!(content(&store.get_doc("d1").unwrap().unwrap().bin), "");
+    // 前一条到了，两条都在
+    store.push_update("d1", &first).unwrap();
+    assert_eq!(
+        content(&store.get_doc("d1").unwrap().unwrap().bin),
+        "先写的后写的"
+    );
+    // 合成快照以后再读一样，也不再有没合进去的
+    assert_eq!(store.pending_updates("d1").unwrap(), 0);
+    assert_eq!(
+        content(&store.get_doc("d1").unwrap().unwrap().bin),
+        "先写的后写的"
+    );
+}

@@ -1,6 +1,7 @@
-//! `tcms bench`：性能基准（`docs/architecture.md` 第 10 节）。都要 TCMS_DATABASE_URL，
+//! `tcms bench`：性能基准（`docs/architecture.md` 第 10 节）。除了 `affine-doc`，都要 TCMS_DATABASE_URL，
 //! 在里面建一个临时 schema，跑完删掉。
 
+mod affine;
 mod data;
 mod index;
 mod read;
@@ -55,6 +56,12 @@ pub enum What {
         #[arg(long)]
         check: bool,
     },
+    /// AFFiNE 内核：读一篇 1 千个块的文档、合并 1 万条更新（含写进本地库）、导出整个工作区。不要数据库。
+    AffineDoc {
+        /// 超过门槛时以非零状态退出（CI 用）。
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 pub async fn run(what: What) -> Result<ExitCode> {
@@ -72,6 +79,7 @@ pub async fn run(what: What) -> Result<ExitCode> {
             budget,
             check,
         } => serve::run(items, requests, budget, check).await,
+        What::AffineDoc { check } => affine::run(check),
     }
 }
 

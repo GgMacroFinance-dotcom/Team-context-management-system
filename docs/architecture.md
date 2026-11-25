@@ -304,8 +304,13 @@ Edited-by: 王审核（tok_01JDX4...）
 | 服务处理过请求以后的物理内存（1 万条，刚处理完） | 不设 | 约 74 到 77 MB（jemalloc 还没把放掉的内存还给系统；原来用 glibc 时约 55 到 63 MB） |
 | 换过 5 次索引以后的物理内存（1 万条，刚换完） | < 160 MB | 约 97 到 106 MB（同上；原来用 glibc 时约 73 到 96 MB，改成专门线程之前约 220 MB，还在涨） |
 | 空闲时内存（1 万条，换过 5 次索引以后不发请求，等 20 秒以上、稳下来） | < 50 MB | 约 40 到 41 MB（原来用 glibc 时约 86 MB，等多久都不降）；1000 条约 27 MB（glibc 约 43 MB） |
+| AFFiNE 内核：读一篇 1 千个块的文档（整篇更新放进新 Doc、读成块、写成 Markdown） | p95 < 25 毫秒 | 中位数 4 到 6 毫秒，p95 5.6 到 9.6 毫秒（2026-11-25） |
+| AFFiNE 内核：合并 1 万条打字的小更新（`affine-store` 的 `merge_updates`） | p95 < 50 毫秒 | 中位数 5.4 到 6.9 毫秒，p95 5.5 到 14 毫秒；yrs 的 `merge_updates_v1` 约 500 到 670 毫秒 |
+| AFFiNE 内核：1 万条更新一条一条写进本地 SQLite 库 | 一共 < 3 秒 | 0.5 到 0.7 秒（每条约 50 到 70 微秒） |
+| AFFiNE 内核：写进去以后第一次读（合成快照、写回、删掉合进去的） | < 100 毫秒 | 21 到 27 毫秒；再读约 0.1 毫秒 |
+| AFFiNE 内核：导出 100 篇、每篇 100 个块成 `.bs.zip` | p95 < 500 毫秒 | 中位数 92 到 126 毫秒，p95 128 到 160 毫秒；整篇导出成 Markdown 约 70 毫秒 |
 
-`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项（含找一次晋升候选），`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
+`tcms bench index [--items N] [--check]` 量索引这几项，`tcms bench read [--items N] [--requests N] [--budget N] [--check]` 量读的这几项（含找一次晋升候选），`tcms bench serve [--items N] [--requests N] [--budget N] [--check]` 起一个真的 `tcms serve --stdio` 子进程、用 MCP 客户端量服务这几项（提议量完一条马上拒掉，免得撞上每个令牌 20 条的上限；最后留 10 条量批准），CI 里都带 `--check` 跑。`tcms bench affine-doc [--check]` 量 AFFiNE 内核（`docs/affine-kernel-rust.md` 的 K5）那几项，不要数据库，CI 里也带 `--check` 跑。`bench read` 造的条目内容有变化（1500 个中文两字词和 40 个英文词，常见词出现得多，每条 30 到 160 个词，约千分之三是规则、千分之二标了常驻），随机数种子固定。
 
 加行级安全时（2026-11-24）用普通账号和超级用户各跑了一遍 `bench index`、`bench read`、`bench serve`，别的几项差别都在每次跑的波动以内（比如从头重建 1 万条 266 和 299 毫秒、取出 1 万条 75 和 69 毫秒）。CI 里的账号是超级用户，量不到行级安全的开销。
 
