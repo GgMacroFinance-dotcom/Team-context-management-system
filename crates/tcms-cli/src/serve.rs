@@ -7,6 +7,8 @@
 //! 配了远端（`TCMS_REMOTE`）时，HTTP 服务每隔 `--sync-secs` 秒和远端同步一次（拉、索引、推），
 //! 交给写入线程做，和批准排同一个队；再配了 `TCMS_WEBHOOK_SECRET` 时，远端收到推送通知 `/hooks/push`，马上同步一次。
 //! stdio 时不同步。
+//! 设了 `TCMS_AFFINE_WORKSPACE`（和连 AFFiNE 的另外几个环境变量，见 `tcms affine`）时，HTTP 服务还一直跟着和 AFFiNE 同步
+//! （`docs/affine-sync.md` 7.4）：AFFiNE 里改完停 10 秒、git 里一变就同步，每 5 分钟全部看一遍；连不上 AFFiNE 不影响服务。
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -137,6 +139,12 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
         }
         None => None,
     };
+    let affine = crate::affine::serve_env(
+        live.store(),
+        &args.repo,
+        args.remote.as_ref(),
+        sync_author(),
+    );
     let hook = webhook_secret.map(|secret| tcms_review::push_hook(writer.clone(), secret));
     let app = tcms_mcp::router(
         live.clone(),
@@ -164,9 +172,28 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
             "提醒：只接受 Host 是本机的请求；从别的机器用域名或 IP 连时，用 --allowed-host 写上它"
         );
     }
-    let served = tcms_mcp::serve_http(listener, app, shutdown())
-        .await
-        .context("HTTP 服务");
+    // 和 AFFiNE 同步在这个任务里跟着跑（不另起线程）；服务停的时候让它做完手上那一次，最多等 20 秒。
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let following = async {
+        let Some(env) = affine else { return };
+        let mut grace = stopped.clone();
+        let run = crate::affine::follow_forever(env, stopped);
+        tokio::pin!(run);
+        tokio::select! {
+            () = &mut run => {}
+            () = async {
+                let _ = grace.wait_for(|s| *s).await;
+                tokio::time::sleep(Duration::from_secs(20)).await;
+            } => eprintln!("AFFiNE 同步 20 秒内没停下来，不等了"),
+        }
+    };
+    let serving = async {
+        let served = tcms_mcp::serve_http(listener, app, shutdown()).await;
+        let _ = stop.send(true);
+        served
+    };
+    let (served, ()) = tokio::join!(serving, following);
+    let served = served.context("HTTP 服务");
     if let Some(sync) = sync {
         sync.abort();
     }
@@ -203,7 +230,7 @@ fn report(live: &Live) {
 }
 
 /// Ctrl-C，或者 SIGTERM（systemd、容器停服务时发的）。
-async fn shutdown() {
+pub(crate) async fn shutdown() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
