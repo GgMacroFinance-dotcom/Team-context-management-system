@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use yrs::updates::decoder::Decode;
-use yrs::{StateVector, Update};
+use yrs::{Doc, Options, ReadTxn, StateVector, Transact, Update};
 
 /// 表结构的版本，记在 SQLite 的 `user_version` 里。
 const SCHEMA_VERSION: i64 = 1;
@@ -126,6 +126,33 @@ fn check_update(bin: &[u8]) -> Result<()> {
     Update::decode_v1(bin)
         .map(|_| ())
         .map_err(|e| Error::BadUpdate(e.to_string()))
+}
+
+/// 把几条更新合成一份。
+///
+/// 放进一个空的 Doc 里应用，再整篇编码出来：比 yrs 的 `merge_updates_v1` 快得多（1 万条小更新约 7 毫秒对约 500 毫秒，
+/// `tcms bench affine-doc`），结果也小（连着打的字合成一段）。不做垃圾回收（`skip_gc`），删掉的内容和 `merge_updates_v1` 一样留着。
+/// 有缺了前面的更新、放不进去的（比如先收到后一条），退回 `merge_updates_v1`：它把放不进去的也原样留在结果里。
+pub fn merge_updates(updates: &[&[u8]]) -> Result<Vec<u8>> {
+    let doc = Doc::with_options(Options {
+        skip_gc: true,
+        ..Options::default()
+    });
+    // 一条一个事务：全放进一个事务里反而慢（1 万条约 90 毫秒，一条一个约 7 毫秒）。
+    for u in updates {
+        let u = Update::decode_v1(u).map_err(|e| Error::BadUpdate(e.to_string()))?;
+        doc.transact_mut()
+            .apply_update(u)
+            .map_err(|e| Error::BadUpdate(e.to_string()))?;
+    }
+    let complete = !doc.transact().has_missing_updates();
+    if complete {
+        Ok(doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default()))
+    } else {
+        yrs::merge_updates_v1(updates.to_vec()).map_err(|e| Error::BadUpdate(e.to_string()))
+    }
 }
 
 /// 空的更新（什么都没改）：两个字节 0，0。
@@ -268,7 +295,7 @@ impl Store {
                 all.push(s);
             }
             all.extend(updates.iter().map(|(_, d)| d.as_slice()));
-            let merged = yrs::merge_updates_v1(all).map_err(|e| Error::BadUpdate(e.to_string()))?;
+            let merged = merge_updates(&all)?;
             tx.execute(
                 "INSERT INTO snapshots (doc_id, data, updated_at) VALUES (?1, ?2, ?3)
                  ON CONFLICT (doc_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",

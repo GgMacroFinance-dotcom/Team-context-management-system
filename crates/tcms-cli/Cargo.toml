@@ -14,6 +14,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+affine-doc.workspace = true
+affine-store.workspace = true
 affine-sync-client.workspace = true
 anyhow.workspace = true
 clap.workspace = true
@@ -31,6 +33,7 @@ tcms-store.workspace = true
 tcms-write.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+yrs.workspace = true
 
 # 内存分配器用 jemalloc（docs/architecture.md 第 10 节“空闲时内存”）。MSVC 上编不了，用系统自带的。
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
