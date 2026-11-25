@@ -5,6 +5,17 @@ use sqlx::Row;
 
 use crate::{Result, Store};
 
+/// 一条和 AFFiNE 同步有关的审计（`affine.sync`、`affine.link`、`affine.resolve`、`affine.resume`）。时间是 UTC。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AffineAudit {
+    pub at: String,
+    pub actor: String,
+    pub action: String,
+    /// 文件路径（`affine.sync` 是工作区 id）。
+    pub target: String,
+    pub detail: serde_json::Value,
+}
+
 /// 接上的范围。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AffineScope {
@@ -288,12 +299,15 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// 处理完一条：删掉它，按处理的结果改底稿（`set` 换成新的，`remove` 去掉）。
+    /// 处理完一条：删掉它，按处理的结果改底稿（`set` 换成新的，`remove` 去掉），记进审计
+    /// （`affine.resolve`，对象是文件路径，`detail` 由调用的一方给）。
     pub async fn resolve_affine_conflict(
         &self,
         id: i64,
         set: Option<&AffineBase>,
         remove: Option<(&str, &str)>,
+        actor: &str,
+        detail: serde_json::Value,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let path: Option<String> =
@@ -339,7 +353,45 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+        crate::tokens::audit(&mut tx, actor, "affine.resolve", &path, detail).await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// 记一条和 AFFiNE 同步有关的审计（不在别的事务里的，比如审核页里让停着的文档接着做：`affine.resume`）。
+    pub async fn record_affine_audit(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        detail: serde_json::Value,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        crate::tokens::audit(&mut tx, actor, action, target, detail).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 和 AFFiNE 同步有关的审计（`affine.` 开头的），新的在前，最多 `limit` 条。
+    pub async fn affine_audit(&self, limit: i64) -> Result<Vec<AffineAudit>> {
+        let rows = sqlx::query(
+            "SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS at, actor, action, \
+                 coalesce(target, '') AS target, detail \
+             FROM audit WHERE action LIKE 'affine.%' ORDER BY seq DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(AffineAudit {
+                    at: r.try_get("at")?,
+                    actor: r.try_get("actor")?,
+                    action: r.try_get("action")?,
+                    target: r.try_get("target")?,
+                    detail: r.try_get("detail")?,
+                })
+            })
+            .collect()
     }
 }

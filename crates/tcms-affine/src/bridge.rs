@@ -1562,11 +1562,11 @@ pub enum Keep {
     Affine,
 }
 
-/// 处理一条等人处理的：改底稿，让下次同步把留下的那边写到另一边。返回它所在的文件。
+/// 处理一条等人处理的：改底稿，让下次同步把留下的那边写到另一边。返回它所在的文件。`actor` 记进审计（`affine.resolve`）。
 ///
 /// 底稿改成“不留的那边”的样子，下次同步时留下的那边就算“改过”、另一边“没改”，照常写过去：
 /// 留 git 就把底稿改成 AFFiNE 的样子，留 AFFiNE 就改成 git 的样子。一边删了的，按要不要留下删掉对应关系。
-pub async fn resolve(store: &Store, id: i64, keep: Keep) -> Result<String, Error> {
+pub async fn resolve(store: &Store, id: i64, keep: Keep, actor: &str) -> Result<String, Error> {
     let Some(c) = store
         .affine_conflicts()
         .await?
@@ -1592,7 +1592,13 @@ pub async fn resolve(store: &Store, id: i64, keep: Keep) -> Result<String, Error
         (Reason::Both | Reason::Readonly | Reason::Invalid, Keep::Git) => {
             (base(&c.affine_title, &c.affine_body), None)
         }
-        (Reason::Both | Reason::Readonly, Keep::Affine) => (base(&c.git_title, &c.git_body), None),
+        (Reason::Both, Keep::Affine) => (base(&c.git_title, &c.git_body), None),
+        // AFFiNE 表示不全的写法，AFFiNE 里改的写回 git 会丢东西。
+        (Reason::Readonly, Keep::Affine) => {
+            return Err(Error::Invalid(format!(
+                "第 {id} 条的写法（表格、图片……）AFFiNE 表示不全，只能留 git 的；要改的话直接改上下文仓库里的 Markdown"
+            )));
+        }
         // 写不过去的：删掉这条记录，下次再试。
         (Reason::Invalid, Keep::Affine) => (None, None),
         // AFFiNE 里删了、git 里改了：留 git 就去掉对应关系（下次当成 git 里新加的写进 AFFiNE）；
@@ -1604,8 +1610,18 @@ pub async fn resolve(store: &Store, id: i64, keep: Keep) -> Result<String, Error
         (Reason::GitDeleted, Keep::Git) => (base(&c.affine_title, &c.affine_body), None),
         (Reason::GitDeleted, Keep::Affine) => (None, unmap),
     };
-    store
-        .resolve_affine_conflict(id, set.as_ref(), remove)
-        .await?;
+    let detail = serde_json::json!({
+        "id": id,
+        "item_id": c.item_id,
+        "heading_id": c.heading_id,
+        "reason": c.reason,
+        "keep": match keep { Keep::Git => "git", Keep::Affine => "affine" },
+    });
+    if !store
+        .resolve_affine_conflict(id, set.as_ref(), remove, actor, detail)
+        .await?
+    {
+        return Err(Error::Invalid(format!("第 {id} 条刚被别人处理了")));
+    }
     Ok(c.path)
 }

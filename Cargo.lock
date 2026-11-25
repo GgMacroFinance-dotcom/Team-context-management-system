@@ -3982,6 +3982,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tcms-affine",
  "tcms-core",
  "tcms-git",
  "tcms-index",

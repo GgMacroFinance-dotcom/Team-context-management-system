@@ -14,8 +14,9 @@ use std::time::Duration;
 use affine_sync_client::Error as ClientError;
 use tcms_affine::workspace::{self, NodeKind};
 use tcms_affine::{
-    Affine, Context, Event, FollowEnv, FollowEvent, FollowOptions, Job, Keep, RandomIds, Section,
-    SyncReport, follow, link, resolve, split, status, sync, to_blocks, to_markdown,
+    Affine, Context, Event, FollowEnv, FollowEvent, FollowLink, FollowOptions, Job, Keep,
+    RandomIds, Section, SyncReport, follow, link, resolve, split, status, sync, to_blocks,
+    to_markdown,
 };
 use tcms_core::{ItemId, Scope};
 use tcms_git::{Author, ContextRepo, FileEdit};
@@ -564,7 +565,7 @@ async fn both_sides_changed_is_held_until_resolved() {
     assert_eq!(affine.items(&doc_id)[1].2, "AFFiNE 里写的。");
 
     // 留 AFFiNE 的：写进 git。
-    resolve(&f.store, c.id, Keep::Affine).await.unwrap();
+    resolve(&f.store, c.id, Keep::Affine, "测试").await.unwrap();
     let r = f.sync(&mut affine, &[]).await;
     let d = r.docs.iter().find(|d| d.path == MACRO).unwrap();
     assert_eq!((d.to_git.updated, d.to_affine.total()), (1, 0), "{d:?}");
@@ -580,7 +581,7 @@ async fn both_sides_changed_is_held_until_resolved() {
     f.git_commit(&[put(MACRO, &text)]).await;
     f.sync(&mut affine, &[]).await;
     let id = status(&f.store).await.unwrap().conflicts[0].id;
-    resolve(&f.store, id, Keep::Git).await.unwrap();
+    resolve(&f.store, id, Keep::Git, "测试").await.unwrap();
     let r = f.sync(&mut affine, &[]).await;
     let d = r.docs.iter().find(|d| d.path == MACRO).unwrap();
     assert_eq!((d.to_git.total(), d.to_affine.updated), (0, 1), "{d:?}");
@@ -771,6 +772,7 @@ async fn follow_syncs_both_ways_without_holding_the_lock() {
         actor: "测试".to_owned(),
         remote: None,
         author: Author::default(),
+        link: FollowLink::default(),
     };
     let ms = Duration::from_millis;
     let opts = FollowOptions {
@@ -851,4 +853,96 @@ async fn follow_syncs_both_ways_without_holding_the_lock() {
     assert_eq!(log.borrow().len(), 5, "{:?}", log.borrow());
     let s = status(&f.store).await.unwrap();
     assert_eq!(s.docs.len(), 3);
+}
+
+/// 审核页通过 `FollowLink` 看跟着同步的状态，处理完等人处理的、让停着的文档接着做以后让它马上同步。
+#[tokio::test]
+async fn follow_takes_requests_from_the_review_page() {
+    let Some((f, affine)) = linked().await else {
+        return;
+    };
+    let doc_id = affine.page_id("数据源");
+    let table_doc = affine.page_id("表格");
+    // 开始跟着同步之前：PMI 两边都改了；表格那篇在 AFFiNE 里删掉了唯一的一条（一半以上，会停下来）。
+    affine.human_edit(&doc_id, "PMI", "PMI", "AFFiNE 里写的。");
+    let text = f
+        .read(MACRO)
+        .unwrap()
+        .replace("PMI 用统计局和财新两个。", "git 里写的。");
+    f.git_commit(&[put(MACRO, &text)]).await;
+    tcms_affine::remove_item(
+        affine.doc(&table_doc),
+        &affine.heading(&table_doc, "口径表"),
+    )
+    .unwrap();
+
+    let mem = Rc::new(RefCell::new(affine));
+    let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut shared = Shared { mem, events: rx };
+    let link = FollowLink::default();
+    let env = FollowEnv {
+        repo: f.path().to_path_buf(),
+        store: f.store.clone(),
+        workspace: WS.to_owned(),
+        actor: "测试".to_owned(),
+        remote: None,
+        author: Author::default(),
+        link: link.clone(),
+    };
+    // 不看 git、不定时全部看：只有第一次和审核页叫的时候同步。
+    let opts = FollowOptions {
+        quiet: Duration::from_millis(200),
+        max_wait: Duration::from_secs(2),
+        git_poll: Duration::from_secs(600),
+        full_every: Duration::from_secs(600),
+        retry: Duration::from_millis(200),
+    };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let log: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let table = "role-macro/表格.md";
+
+    let script = async {
+        wait_for("第一次同步", || !log.borrow().is_empty()).await;
+        let st = link.state();
+        assert_eq!(st.connection, tcms_affine::Connection::Connected);
+        assert!(st.since_ms.is_some() && st.last_sync_ms.is_some());
+        assert!(st.error.is_none(), "{st:?}");
+        let s = status(&f.store).await.unwrap();
+        assert_eq!(s.conflicts.len(), 1);
+        let paused = s.docs.iter().find(|d| d.path == table).unwrap();
+        assert!(paused.paused.is_some(), "{s:?}");
+
+        // 审核页里留了 AFFiNE 的：不用等广播、不用等全部看一遍，马上写进 git。
+        resolve(&f.store, s.conflicts[0].id, Keep::Affine, "审核的人")
+            .await
+            .unwrap();
+        link.sync_now(&doc_id);
+        wait_for("马上同步那一篇", || log.borrow().len() >= 2).await;
+        assert_eq!(log.borrow()[1], format!("docs:{MACRO} synced"));
+        assert!(f.read(MACRO).unwrap().contains("AFFiNE 里写的。"));
+        assert!(link.queued().docs.is_empty());
+
+        // 审核页里让表格那篇接着做：git 里归档那一条，同步成了才从排着的里去掉。
+        link.resume(table);
+        assert_eq!(link.queued().resume, [table]);
+        wait_for("接着做", || log.borrow().len() >= 3).await;
+        assert_eq!(log.borrow()[2], format!("docs:{table} synced"));
+        // 唯一的一条归档了，文件也不在了。
+        assert!(f.read(table).is_none_or(|t| !t.contains("## 口径表")));
+        assert!(link.queued().resume.is_empty());
+        let s = status(&f.store).await.unwrap();
+        assert!(s.docs.iter().all(|d| d.paused.is_none()), "{s:?}");
+        assert!(s.conflicts.is_empty());
+        assert!(link.state().last_change_ms.is_some());
+        stop.send(true).unwrap();
+    };
+    let follower = follow(&env, &mut shared, opts, stopped, |ev| {
+        log.borrow_mut().push(describe(&ev))
+    });
+    tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(follower, script);
+    })
+    .await
+    .expect("跟着同步没停下来");
+    assert_eq!(log.borrow().len(), 3, "{:?}", log.borrow());
 }

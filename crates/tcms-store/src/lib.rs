@@ -34,7 +34,7 @@ mod uses;
 
 pub use sqlx::postgres::PgListener;
 
-pub use affine::{AffineBase, AffineConflict, AffineDoc, AffineSave, AffineScope};
+pub use affine::{AffineAudit, AffineBase, AffineConflict, AffineDoc, AffineSave, AffineScope};
 pub use proposals::{Action, CommitLock, Decision, NewProposal, ProposalRow, Proposed};
 pub use tokens::{
     ALL_PROJECTS, Identity, ItemRead, NewToken, Reviewer, TOKEN_PREFIX, TokenRow, VisibleChange,

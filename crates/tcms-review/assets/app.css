@@ -165,3 +165,15 @@ textarea { min-height: 220px; font-family: var(--mono); font-size: 13px; resize:
 h1.section { margin-top: 36px; }
 /* 晋升的理由是一两句话，不用正文那么高的框。 */
 textarea.reason { min-height: 72px; font-family: inherit; font-size: inherit; }
+
+/* 和 AFFiNE 同步：等人处理的一条一块，两边并排；停着的文档一篇一块。 */
+.affine-conflict, .affine-paused { margin-bottom: 14px; }
+.affine-conflict > h3, .affine-paused > h3 { font-size: 15px; margin: 0 0 4px; }
+.meta-line { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+details.base { margin-top: 10px; }
+details.base summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details.base pre { margin-top: 6px; }
+ul.hints { margin: 8px 0 0; padding-left: 18px; }
+.affine-paused .actions { align-items: center; }
+/* 只列出来、点不进去的行（接上的文档、最近的）。 */
+.list div.row { padding: 10px 4px; }

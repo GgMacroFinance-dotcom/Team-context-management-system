@@ -21,5 +21,8 @@ pub use bridge::{
     AFFINE_EMAIL, Context, Counts, DocReport, DocStatus, Error, Keep, SYNC_TRAILER, Status,
     SyncReport, folders_doc_id, link, resolve, status, sync,
 };
-pub use follow::{FollowEnv, FollowEvent, FollowOptions, Job, Schedule, follow};
+pub use follow::{
+    Connection, FollowEnv, FollowEvent, FollowLink, FollowOptions, FollowState, Job, Queued,
+    Schedule, follow,
+};
 pub use server::{Affine, Event, Server};

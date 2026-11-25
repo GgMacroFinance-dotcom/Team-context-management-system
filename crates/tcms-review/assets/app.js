@@ -155,7 +155,7 @@
     if (detail) remoteBar.append(h("div", { class: "detail" }, detail));
     remoteBar.hidden = false;
   }
-  setInterval(refreshRemote, 30000);
+  setInterval(() => { refreshRemote(); refreshAffineTab(); }, 30000);
 
   // ---------- 登录 ----------
 
@@ -208,7 +208,9 @@
       document.getElementById("tabs").hidden = false;
       document.getElementById("who").hidden = false;
       document.getElementById("who-name").textContent = me.name;
+      document.getElementById("tab-affine").hidden = !me.affine;
       refreshRemote();
+      refreshAffineTab();
     }
     const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
     const tab = parts[0] || "proposals";
@@ -218,6 +220,7 @@
       if (tab === "due") await showDue();
       else if (tab === "items") await (parts[1] ? showItem(parts[1]) : showItems());
       else if (tab === "promotions") await showPromotions();
+      else if (tab === "affine") await showAffine();
       else if (tab === "proposals") await (parts[1] ? showProposal(parts[1]) : showProposals());
       else location.hash = "#/proposals";
     } catch (e) {
@@ -618,6 +621,193 @@
       used.length ? h("p", { class: "muted small" },
         `岗位、团队、项目里的条目，最近 ${data.use_window_days} 天被 agent 用了至少 ${data.min_uses} 次、在至少 ${data.min_use_days} 天里用过（按任务挑中放了全文、或者读了全文都算一次）。共 ${data.used_total} 条${data.used_total > data.limit ? `，只列前 ${data.limit} 条` : ""}。`) : null,
       ...used);
+  }
+
+  // ---------- 和 AFFiNE 同步 ----------
+
+  const CONN = { off: "没跟着同步", connecting: "在连", connected: "连着", disconnected: "断了，在重连" };
+  const AUDIT = { "affine.sync": "同步", "affine.link": "接上", "affine.resolve": "处理等人处理的", "affine.resume": "接着做" };
+  const tabAffine = document.getElementById("tab-affine");
+
+  // 标签上写着要人处理的有几件（等人处理的条目、停着的文档）。
+  function setAffineCount(d) {
+    const n = d.conflicts.length + d.docs.filter((x) => x.paused && !x.resuming).length;
+    tabAffine.textContent = n ? `和 AFFiNE 同步（${n}）` : "和 AFFiNE 同步";
+  }
+
+  async function refreshAffineTab() {
+    if (!me || !me.affine) return;
+    try {
+      setAffineCount(await api("GET", "/api/affine"));
+    } catch { /* 下次再说 */ }
+  }
+
+  const sideText = (s) => (s ? `标题：${s.title}\n\n${s.body}` : "");
+
+  async function showAffine(flash) {
+    const d = await api("GET", "/api/affine");
+    setAffineCount(d);
+    const when = (ms) => ago(d.now_ms - ms);
+    const f = d.follow;
+    const parts = [
+      h("h1", {}, "和 AFFiNE 同步"),
+      h("div", { class: "toolbar" }, h("button", { type: "button", class: "secondary", id: "affine-refresh", onclick: () => showAffine() }, "刷新")),
+      flash ? h("div", { class: "note ok", role: "status" }, flash) : null,
+    ];
+
+    if (!d.following) {
+      parts.push(h("div", { class: "note warn" },
+        "这个服务没在跟着同步（没设 TCMS_AFFINE_WORKSPACE）。下面是上次同步记下的；在这里处理的，下次 tcms affine sync 时写过去。"));
+    } else {
+      const conn = f.connection === "connected" ? `连着，${when(f.since_ms)}连上的`
+        : f.connection === "disconnected" ? `断了，${when(f.since_ms)}断的，在重连`
+          : CONN[f.connection] || f.connection;
+      parts.push(h("div", { class: "panel", id: "affine-connection" }, fields([
+        ["工作区", h("code", {}, f.workspace)],
+        ["连接", conn],
+        ["上次同步", f.last_sync_ms ? when(f.last_sync_ms) : "启动以后还没同步过"],
+        ["上次有改动", f.last_change_ms ? when(f.last_change_ms) : null],
+      ])));
+      if (f.error) parts.push(h("div", { class: "note err", role: "alert" }, `出错了（${when(f.error_ms)}）：${f.error}。过一会儿会再试。`));
+    }
+
+    parts.push(h("h2", {}, `等人处理的（${d.conflicts.length} 条）`));
+    parts.push(d.conflicts.length
+      ? h("p", { class: "muted small" }, "这些条目两边都改了（或者一边删了、另一边改了），没有自动合。处理之前这一条两边都不动，同一篇里别的条目照常同步。左右两栏各自和上次同步完的样子比。")
+      : h("div", { class: "panel" }, h("div", { class: "empty" }, "没有等人处理的。")));
+    for (const c of d.conflicts) parts.push(conflictCard(c));
+
+    const paused = d.docs.filter((x) => x.paused);
+    if (paused.length) {
+      parts.push(h("h2", {}, `停着的文档（${paused.length} 篇）`));
+      for (const x of paused) parts.push(pausedCard(x, d.following));
+    }
+
+    parts.push(h("h2", {}, `接上的文档（${d.docs.length} 篇）`));
+    parts.push(h("p", { class: "muted small" }, d.scopes.length
+      ? `接上的范围：${d.scopes.map((s) => `${s.scope}（${s.whole ? "整个范围，新文件、新文档也同步" : "只接了几个文件"}）`).join("、")}。`
+      : "还没接上范围（tcms affine link <范围>）。"));
+    parts.push(h("div", { class: "panel" }, d.docs.length
+      ? h("ul", { class: "list" }, d.docs.map((x) => h("li", {}, h("div", { class: "row" },
+        h("div", { class: "title mono" }, x.path),
+        h("div", { class: "meta" },
+          h("span", {}, `${x.items} 条`),
+          h("span", {}, `上次同步 ${x.synced_at}`),
+          x.resuming ? badge("排着等接着做", "open") : x.paused ? badge("停着", "rejected") : null)))))
+      : h("div", { class: "empty" }, "没有接上的文档。")));
+
+    if (d.readonly.length) {
+      parts.push(h("h2", {}, `在 AFFiNE 里只能看的条目（${d.readonly.length} 条）`));
+      parts.push(h("p", { class: "muted small" }, "这些条目里有表格、图片之类 AFFiNE 表示不全的写法：AFFiNE 里照样显示，在那边改了不写回 git。要改就在“浏览条目”里改，或者直接改上下文仓库里的 Markdown。"));
+      parts.push(h("div", { class: "panel" }, h("ul", { class: "list" }, d.readonly.map((it) => h("li", {},
+        h("a", { class: "row", href: `#/items/${enc(it.item_id)}` },
+          h("div", { class: "title" }, it.title),
+          h("div", { class: "meta" }, h("span", { class: "mono" }, it.path))))))));
+    }
+
+    if (d.recent.length) {
+      parts.push(h("h2", {}, "最近的"));
+      parts.push(h("div", { class: "panel" }, h("ul", { class: "list" }, d.recent.map((a) => h("li", {}, h("div", { class: "row" },
+        h("div", {}, `${AUDIT[a.action] || a.action}${a.detail && a.detail.keep ? `（按 ${a.detail.keep === "git" ? "git" : "AFFiNE"} 的）` : ""} · `, h("span", { class: "mono" }, a.target)),
+        h("div", { class: "meta" }, h("span", {}, a.actor), h("span", {}, `${a.at}`))))))));
+    }
+    render(...parts);
+  }
+
+  // 一条等人处理的：两边并排（各自和底稿比），几个处理的按钮；两边都改了的还能改出合并后的。
+  function conflictCard(c) {
+    const status = h("div", {});
+    const buttons = [];
+    const busy = (on) => card.querySelectorAll("button").forEach((b) => { b.disabled = on; });
+    async function send(body, what) {
+      busy(true);
+      status.replaceChildren(h("p", { class: "muted" }, "正在处理…"));
+      try {
+        const r = await api("POST", `/api/affine/conflicts/${c.id}/resolve`, body);
+        const commit = r.edit ? `，git 里提交了 ${short(r.edit.commit)}${remoteNote(r.edit.remote)}` : "";
+        const next = r.following ? "马上同步这一篇" : "下次 tcms affine sync 时写过去";
+        await showAffine(`${r.path} 的“${c.title}”：${what}${commit}；${next}。`);
+      } catch (e) {
+        busy(false);
+        if (e.status === 401) return;
+        status.replaceChildren(h("div", { class: "note err", role: "alert" },
+          e.body.code === "stale" ? `${e.message}（点上面的“刷新”）` : e.message));
+      }
+    }
+    for (const ch of c.choices) {
+      buttons.push(h("button", { type: "button", class: "secondary", "data-keep": ch.keep, onclick: () => send({ keep: ch.keep }, `${ch.label}，${ch.then}`) }, ch.label));
+    }
+    let form = null;
+    if (c.can_merge) {
+      const title = h("input", { type: "text", class: "merge-title", value: c.git.title });
+      const text = h("textarea", { class: "merge-body", value: c.git.body });
+      form = h("form", {
+        class: "stack", hidden: true,
+        onsubmit: (ev) => {
+          ev.preventDefault();
+          send({ keep: "merged", title: title.value, body: text.value }, "改成了合并后的");
+        },
+      },
+      h("p", { class: "muted small" }, "先填的是 git 里的，对照上面两栏改成合并后的。保存以后 git 里改成这样（一个提交，提交者是你），再写进 AFFiNE。"),
+      h("label", {}, "标题", title),
+      h("label", {}, "正文（Markdown，不能有一级、二级标题）", text),
+      h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "保存合并后的")));
+      buttons.push(h("button", { type: "button", class: "secondary", "data-keep": "merged", onclick: () => { form.hidden = !form.hidden; } }, "改出合并后的"));
+    }
+    const column = (label, s, lines) => h("div", {},
+      h("h3", {}, label),
+      s ? diffBlock(lines) : h("p", { class: "muted" }, "删掉了"));
+    const card = h("section", { class: "panel affine-conflict", id: `conflict-${c.id}` },
+      h("h3", {}, c.title || "（没有标题）"),
+      h("div", { class: "meta-line" },
+        badge(c.label, "open"),
+        h("span", { class: "mono" }, c.path),
+        c.item_id ? h("a", { href: `#/items/${enc(c.item_id)}` }, c.item_id) : null,
+        h("span", {}, `${c.found_at} 记下的`)),
+      c.message ? h("div", { class: "note warn" }, c.message) : null,
+      h("div", { class: "compare" },
+        column("git 里的", c.git, c.git_diff),
+        column("AFFiNE 里的", c.affine, c.affine_diff)),
+      c.base ? h("details", { class: "base" }, h("summary", {}, "上次同步完两边一样的样子（底稿）"), h("pre", { class: "body" }, sideText(c.base))) : null,
+      h("div", { class: "actions" }, buttons),
+      h("ul", { class: "hints muted small" },
+        c.choices.map((ch) => h("li", {}, `${ch.label}：${ch.then}`)),
+        c.can_merge ? h("li", {}, "改出合并后的：git 里改成你写的，再写进 AFFiNE") : null),
+      form,
+      status);
+    return card;
+  }
+
+  // 一篇停着的文档：为什么停，看过以后点两下接着做（第一下问一句）。
+  function pausedCard(x, following) {
+    const status = h("div", {});
+    const row = h("div", { class: "actions" });
+    const ask = () => row.replaceChildren(
+      h("span", {}, "接着做就照上面说的做（比如在 git 里归档那几条），能从 git 历史里找回。确定吗？"),
+      h("button", { type: "button", class: "danger", "data-confirm": "resume", onclick: go }, "确定接着做"),
+      h("button", { type: "button", class: "secondary", onclick: idle }, "算了"));
+    const idle = () => row.replaceChildren(
+      h("button", { type: "button", class: "secondary", "data-resume": x.path, onclick: ask }, "看过了，接着做"));
+    async function go() {
+      row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      status.replaceChildren(h("p", { class: "muted" }, "正在处理…"));
+      try {
+        const r = await api("POST", "/api/affine/docs/resume", { path: x.path });
+        await showAffine(`${r.path}：接着做，马上同步这一篇。`);
+      } catch (e) {
+        if (e.status === 401) return;
+        idle();
+        status.replaceChildren(h("div", { class: "note err", role: "alert" }, e.message));
+      }
+    }
+    if (x.resuming) row.replaceChildren(badge("排着等接着做", "open"), h("span", { class: "muted small" }, "做完就不在这里了，点“刷新”看。"));
+    else if (following) idle();
+    else row.replaceChildren(h("span", { class: "muted small" }, `这个服务没在跟着同步：在命令行用 tcms affine sync --resume ${x.path}`));
+    return h("section", { class: "panel affine-paused" },
+      h("h3", { class: "mono" }, x.path),
+      h("div", { class: "note warn" }, x.paused),
+      row,
+      status);
   }
 
   // 改单条的纯文本：标题、标签、复核日期、正文。类型、范围不在这里改。

@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use tcms_affine::{
-    Context, DocReport, FollowEnv, FollowEvent, FollowOptions, Keep, Server, SyncReport,
+    Context, DocReport, FollowEnv, FollowEvent, FollowLink, FollowOptions, Keep, Server, SyncReport,
 };
 use tcms_core::Scope;
 use tcms_git::{Author, Remote};
@@ -131,6 +131,7 @@ pub async fn run(
             actor,
             remote: remote.cloned(),
             author,
+            link: FollowLink::default(),
         };
         let (stop, stopped) = watch::channel(false);
         let run = follow_forever(env, stopped);
@@ -170,7 +171,7 @@ pub async fn run(
                 Side::Git => Keep::Git,
                 Side::Affine => Keep::Affine,
             };
-            let path = tcms_affine::resolve(&store, id, keep).await?;
+            let path = tcms_affine::resolve(&store, id, keep, cx.actor).await?;
             if !json {
                 println!("第 {id} 条（{path}）处理了，接着同步一次。");
             }
@@ -197,6 +198,7 @@ fn doc_lines(d: &DocReport) -> Vec<String> {
         "paused" => "停着",
         "unlinked" => "git 里删了，文档移进了 AFFiNE 的回收站",
         "skipped" => "没接",
+        "unchanged" if d.held > 0 => "别的条目两边都没变",
         "unchanged" => "两边都没变",
         other => other,
     };
@@ -281,6 +283,7 @@ pub fn serve_env(
         actor: crate::actor(),
         remote: remote.cloned(),
         author,
+        link: FollowLink::default(),
     })
 }
 
@@ -289,11 +292,13 @@ pub fn serve_env(
 pub async fn follow_forever(env: FollowEnv, mut stop: watch::Receiver<bool>) {
     let mut wait = Duration::from_secs(5);
     let mut said: Option<String> = None;
+    env.link.connecting(&env.workspace, None);
     let mut server = loop {
         match server().await {
             Ok(s) => break s,
             Err(e) => {
                 let msg = format!("{e:#}");
+                env.link.connecting(&env.workspace, Some(msg.clone()));
                 if said.as_deref() != Some(msg.as_str()) {
                     eprintln!("AFFiNE 同步：连不上（{msg}），过一会儿再试");
                     said = Some(msg);
@@ -332,7 +337,12 @@ impl FollowLog {
                 if self.error.take().is_some() {
                     eprintln!("AFFiNE 同步：又好了");
                 }
-                for d in report.docs.iter().filter(|d| d.state != "unchanged") {
+                // 只记下了等人处理的、别的都没变的文档也写一行（下次同步跳过它们，所以只写这一次）。
+                for d in report
+                    .docs
+                    .iter()
+                    .filter(|d| d.state != "unchanged" || d.held > 0)
+                {
                     let lines = doc_lines(d);
                     if matches!(d.state, "skipped" | "paused") {
                         let text = lines.join("\n");

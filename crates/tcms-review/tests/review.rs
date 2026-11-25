@@ -11,11 +11,14 @@ use axum::body::Body;
 use http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use tcms_affine::FollowLink;
 use tcms_core::ItemId;
 use tcms_git::{Author, ContextRepo, FileEdit, Remote};
 use tcms_mcp::{HttpOptions, Live};
 use tcms_review::{ReviewOptions, Writer, router};
-use tcms_store::{Identity, NewToken, Store};
+use tcms_store::{
+    AffineBase, AffineConflict, AffineDoc, AffineSave, AffineScope, Identity, NewToken, Store,
+};
 use tcms_write::{ProposeArgs, propose};
 use tower::ServiceExt;
 
@@ -118,6 +121,7 @@ async fn fixture_with(remote: impl FnOnce(&Path) -> Option<Remote>) -> Option<Fi
         ReviewOptions {
             allowed_hosts: vec!["ctx.example.com".to_owned()],
             author_email: "review@example.com".to_owned(),
+            affine: None,
         },
     );
     Some(Fixture {
@@ -1314,6 +1318,428 @@ async fn promotion_candidates_page() {
     assert!(f.live.refresh().await.unwrap().is_some());
     let v = get(&f, "/api/promotions").await;
     assert_eq!(v["total"], 0, "{v}");
+
+    f.store.drop_schema().await.unwrap();
+}
+
+// ---------------------------------------------------------------- 和 AFFiNE 同步
+
+const WS: &str = "ws-test";
+const TABLE: &str = "| 月份 | 日子 |\n| --- | --- |\n| 1 月 | 15 日 |";
+
+fn affine_doc(path: &str, doc_id: &str, paused: Option<&str>) -> AffineDoc {
+    AffineDoc {
+        path: path.to_owned(),
+        scope: "role:macro".to_owned(),
+        workspace_id: WS.to_owned(),
+        doc_id: doc_id.to_owned(),
+        state: Vec::new(),
+        git_blob: None,
+        synced_commit: None,
+        paused: paused.map(str::to_owned),
+        synced_at: String::new(),
+    }
+}
+
+fn affine_base(path: &str, item: &str, heading: &str, title: &str, body: &str) -> AffineBase {
+    AffineBase {
+        item_id: item.to_owned(),
+        path: path.to_owned(),
+        heading_id: heading.to_owned(),
+        title: title.to_owned(),
+        body: body.to_owned(),
+    }
+}
+
+/// 一条等人处理的：git、AFFiNE、底稿各是（标题，正文），标题都一样。
+fn affine_conflict(
+    path: &str,
+    item: &str,
+    heading: &str,
+    reason: &str,
+    title: &str,
+    [git, affine, base]: [&str; 3],
+) -> AffineConflict {
+    let some = |s: &str| Some(s.to_owned());
+    AffineConflict {
+        id: 0,
+        path: path.to_owned(),
+        item_id: some(item),
+        heading_id: some(heading),
+        reason: reason.to_owned(),
+        message: None,
+        git_title: some(title),
+        git_body: some(git),
+        affine_title: some(title),
+        affine_body: some(affine),
+        base_title: some(title),
+        base_body: some(base),
+        found_at: String::new(),
+    }
+}
+
+/// 假装同步过：宏观的两个文件接上了；数据源那条两边都改了，日历停着（一次删一半以上），
+/// 日历里一条带表格（在 AFFiNE 里只能看）、AFFiNE 里改了它，另一条两边都改了但 git 里后来又改过。
+async fn seed_affine(f: &Fixture) {
+    let s = &f.store;
+    s.put_affine_scope(&AffineScope {
+        scope: "role:macro".to_owned(),
+        workspace_id: WS.to_owned(),
+        folder_id: "folder-macro".to_owned(),
+        whole: true,
+    })
+    .await
+    .unwrap();
+    let src = "role-macro/数据源.md";
+    s.save_affine_doc(&AffineSave {
+        doc: affine_doc(src, "doc-src", None),
+        set: vec![affine_base(
+            src,
+            MACRO,
+            "h-macro",
+            "宏观数据从哪里取",
+            "CPI 用统计局的数。",
+        )],
+        remove: vec![],
+        conflicts: vec![affine_conflict(
+            src,
+            MACRO,
+            "h-macro",
+            "both",
+            "宏观数据从哪里取",
+            [
+                "CPI 用国家统计局的数。",
+                "CPI 用统计局公布的数。",
+                "CPI 用统计局的数。",
+            ],
+        )],
+    })
+    .await
+    .unwrap();
+    let cal = "role-macro/日历.md";
+    s.save_affine_doc(&AffineSave {
+        doc: affine_doc(
+            cal,
+            "doc-cal",
+            Some("AFFiNE 里一次删掉了 2 条里的 2 条，没有在 git 里归档"),
+        ),
+        set: vec![
+            affine_base(cal, OLD, "h-old", "旧的发布日历", "2019 年的。"),
+            affine_base(cal, LATER, "h-later", "以后的发布日历", TABLE),
+        ],
+        remove: vec![],
+        conflicts: vec![
+            affine_conflict(
+                cal,
+                LATER,
+                "h-later",
+                "readonly",
+                "以后的发布日历",
+                [TABLE, "改成一句话。", TABLE],
+            ),
+            affine_conflict(
+                cal,
+                OLD,
+                "h-old",
+                "both",
+                "旧的发布日历",
+                ["记下时 git 里的。", "AFFiNE 里改的。", "2019 年的。"],
+            ),
+        ],
+    })
+    .await
+    .unwrap();
+}
+
+fn conflict_id(v: &Value, item: &str) -> i64 {
+    v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["item_id"] == item)
+        .unwrap_or_else(|| panic!("没有 {item}：{v}"))["id"]
+        .as_i64()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn affine_sync_page() {
+    let Some(f) = fixture().await else { return };
+    // 没接上过、没跟着同步：网页不显示这一页。
+    assert_eq!(get(&f, "/api/me").await["affine"], false);
+    seed_affine(&f).await;
+    assert_eq!(get(&f, "/api/me").await["affine"], true);
+
+    // 这个服务没跟着同步：照样看得到上次同步记下的。
+    let v = get(&f, "/api/affine").await;
+    assert_eq!(v["following"], false, "{v}");
+    assert!(v["follow"].is_null());
+    assert_eq!(v["scopes"][0]["scope"], "role:macro");
+    let docs = v["docs"].as_array().unwrap();
+    assert_eq!(docs.len(), 2, "{v}");
+    let cal = docs
+        .iter()
+        .find(|d| d["path"] == "role-macro/日历.md")
+        .unwrap();
+    assert!(cal["paused"].as_str().unwrap().contains("一次删掉了"));
+    assert_eq!(cal["resuming"], false);
+    assert_eq!(
+        v["readonly"],
+        json!([{"item_id": LATER, "path": "role-macro/日历.md", "title": "以后的发布日历"}])
+    );
+    let c = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["item_id"] == MACRO)
+        .unwrap();
+    assert_eq!(c["reason"], "both");
+    assert_eq!(c["label"], "两边都改了，改得不一样");
+    assert_eq!(c["can_merge"], true);
+    assert_eq!(c["git"]["body"], "CPI 用国家统计局的数。");
+    assert_eq!(c["affine"]["body"], "CPI 用统计局公布的数。");
+    assert_eq!(c["base"]["body"], "CPI 用统计局的数。");
+    // 两边各和底稿比。
+    assert!(
+        c["git_diff"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"op": "removed", "line": "CPI 用统计局的数。"}))
+    );
+    assert!(
+        c["git_diff"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"op": "added", "line": "CPI 用国家统计局的数。"}))
+    );
+    assert!(
+        c["affine_diff"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"op": "added", "line": "CPI 用统计局公布的数。"}))
+    );
+    let keeps: Vec<&str> = c["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["keep"].as_str().unwrap())
+        .collect();
+    assert_eq!(keeps, ["git", "affine"]);
+    let readonly = conflict_id(&v, LATER);
+    let keeps = &v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == readonly)
+        .unwrap()["choices"];
+    assert_eq!(
+        keeps.as_array().unwrap().len(),
+        1,
+        "只读的只能留 git 的：{keeps}"
+    );
+
+    // 没跟着同步时接着做不了，告诉人用命令行。
+    let r = post(
+        &f,
+        "/api/affine/docs/resume",
+        json!({"path": "role-macro/日历.md"}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.json()["code"], "not_following");
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("tcms affine sync --resume role-macro/日历.md")
+    );
+    // 只读的不能留 AFFiNE 的；keep 写错了。
+    let r = post(
+        &f,
+        &format!("/api/affine/conflicts/{readonly}/resolve"),
+        json!({"keep": "affine"}),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let r = post(
+        &f,
+        &format!("/api/affine/conflicts/{readonly}/resolve"),
+        json!({"keep": "both"}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    // agent 的令牌不认。
+    let r = send(&f.app, "GET", "/api/affine", Some(&f.agent_secret), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+
+    // 跟着同步的服务：和跟着同步的一方共用一个 FollowLink。
+    let link = FollowLink::default();
+    link.connecting(WS, None);
+    let app = router(
+        f.live.clone(),
+        f.writer.clone(),
+        ReviewOptions {
+            author_email: "review@example.com".to_owned(),
+            affine: Some(link.clone()),
+            ..ReviewOptions::default()
+        },
+    );
+    let call = |method: &'static str, path: String, body: Option<Value>| {
+        let app = app.clone();
+        let token = f.reviewer.clone();
+        async move { send(&app, method, &path, Some(&token), body).await }
+    };
+    let v = call("GET", "/api/affine".into(), None).await.json();
+    assert_eq!(v["following"], true);
+    assert_eq!(v["follow"]["connection"], "connecting");
+    assert_eq!(v["follow"]["workspace"], WS);
+
+    // 改出合并后的：git 里那条记下以后又改过（记下的不是现在的），不让改。
+    let old = conflict_id(&v, OLD);
+    let r = call(
+        "POST",
+        format!("/api/affine/conflicts/{old}/resolve"),
+        Some(json!({"keep": "merged", "title": "旧的发布日历", "body": "合并的。"})),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    assert_eq!(r.json()["code"], "stale");
+    // 只有两边都改了的能合并。
+    let r = call(
+        "POST",
+        format!("/api/affine/conflicts/{readonly}/resolve"),
+        Some(json!({"keep": "merged", "title": "以后的发布日历", "body": "x"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    // 数据源那条改出合并后的：git 里一个提交（作者是审核的人），底稿换成 AFFiNE 的，马上同步那一篇。
+    let id = conflict_id(&v, MACRO);
+    let head = f.repo.head().unwrap();
+    let r = call(
+        "POST",
+        format!("/api/affine/conflicts/{id}/resolve"),
+        Some(json!({"keep": "merged", "title": "宏观数据从哪里取", "body": "CPI 用国家统计局公布的数。"})),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let done = r.json();
+    assert_eq!(done["path"], "role-macro/数据源.md");
+    assert_eq!(done["following"], true);
+    assert_eq!(done["edit"]["path"], "role-macro/数据源.md");
+    assert_ne!(f.repo.head().unwrap(), head);
+    let text = std::fs::read_to_string(f.path.join("role-macro/数据源.md")).unwrap();
+    assert!(text.contains("CPI 用国家统计局公布的数。"), "{text}");
+    assert_eq!(
+        git(&f.path, &["log", "-1", "--format=%an"]).trim(),
+        "王审核"
+    );
+    assert_eq!(link.queued().docs, ["doc-src"]);
+    let base = f
+        .store
+        .affine_bases()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.item_id == MACRO)
+        .unwrap();
+    assert_eq!(
+        base.body, "CPI 用统计局公布的数。",
+        "底稿换成 AFFiNE 的，下次同步把 git 的写过去"
+    );
+    // 同一条再处理一次：已经不在了。
+    let r = call(
+        "POST",
+        format!("/api/affine/conflicts/{id}/resolve"),
+        Some(json!({"keep": "git"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+
+    // 只读的那条留 git 的。
+    let r = call(
+        "POST",
+        format!("/api/affine/conflicts/{readonly}/resolve"),
+        Some(json!({"keep": "git"})),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    assert_eq!(link.queued().docs, ["doc-cal", "doc-src"]);
+
+    // 接着做：没停着的、没接上的不行；停着的排上，同步成了才去掉。
+    let r = call(
+        "POST",
+        "/api/affine/docs/resume".into(),
+        Some(json!({"path": "role-macro/数据源.md"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.json()["code"], "not_paused");
+    let r = call(
+        "POST",
+        "/api/affine/docs/resume".into(),
+        Some(json!({"path": "org/规矩.md"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = call(
+        "POST",
+        "/api/affine/docs/resume".into(),
+        Some(json!({"path": "role-macro/日历.md"})),
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    assert_eq!(link.queued().resume, ["role-macro/日历.md"]);
+    let v = call("GET", "/api/affine".into(), None).await.json();
+    let cal = v["docs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["path"] == "role-macro/日历.md")
+        .unwrap();
+    assert_eq!(cal["resuming"], true);
+    assert_eq!(v["conflicts"].as_array().unwrap().len(), 1, "{v}");
+
+    // 都记进了审计，谁做的、留的哪边。
+    let audit = f.store.affine_audit(10).await.unwrap();
+    let actions: Vec<&str> = audit.iter().map(|a| a.action.as_str()).collect();
+    assert_eq!(
+        actions,
+        ["affine.resume", "affine.resolve", "affine.resolve"]
+    );
+    assert!(
+        audit.iter().all(|a| a.actor.starts_with("王审核")),
+        "{audit:?}"
+    );
+    assert_eq!(audit[1].target, "role-macro/日历.md");
+    assert_eq!(audit[1].detail["keep"], "git");
+    assert_eq!(audit[2].detail["item_id"], MACRO);
+    assert_eq!(v["recent"].as_array().unwrap().len(), 3);
 
     f.store.drop_schema().await.unwrap();
 }
