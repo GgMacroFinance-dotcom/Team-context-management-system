@@ -3,6 +3,7 @@
 //! - [`Client`]：一个 AFFiNE 服务和一个账号。邮箱密码登录，拿网页版那种 cookie 会话；GraphQL（工作区、
 //!   最近改过的文档、评论）。
 //! - [`SyncConnection`]：socket.io 上的同步协议，收发的是 Yjs 更新的字节；断线以后自己重连。
+//! - [`Replica`]：一个工作区的本地副本（`affine-store` 的 SQLite 库），断网时照样能改，连上以后补推、补拉。
 //!
 //! 这个 crate 只认 AFFiNE 的协议，不用 TCMS 自己的类型。2026-11-24 从 TCMS 的 `tcms-affine-client`（A2）原样改名搬进
 //! AFFiNE 内核（`docs/affine-kernel-rust.md` 的 K3）。文档里面是什么（块、条目、文件夹表）由 `affine-doc` 管。
@@ -14,6 +15,7 @@ pub mod client;
 pub mod graphql;
 mod http;
 pub mod net;
+pub mod replica;
 mod socketio;
 pub mod sync;
 
@@ -22,6 +24,7 @@ pub use graphql::{
     Comment, CommentChange, DocInfo, DocMode, Page, WorkspaceInfo, comment_content, comment_text,
 };
 pub use net::Endpoint;
+pub use replica::{DocSync, FollowUp, Remote, Replica, SyncReport};
 pub use sync::{Intent, LoadedDoc, Pushed, SyncConnection, SyncEvent};
 
 /// 连 AFFiNE 时出的错。
@@ -42,6 +45,9 @@ pub enum Error {
     Disconnected,
     #[error("等 AFFiNE 回复 {0} 超时")]
     Timeout(String),
+    /// 本地副本的库（[`Replica`]）出的错。
+    #[error("本地库：{0}")]
+    Store(#[from] affine_store::Error),
 }
 
 impl Error {
