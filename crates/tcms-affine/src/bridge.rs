@@ -159,10 +159,9 @@ fn delta(doc: &Doc, since: &Snapshot) -> Option<Vec<u8>> {
     (txn.snapshot() != *since).then(|| txn.encode_state_as_update_v1(&since.state_map))
 }
 
-/// 工作区里文件夹树那篇文档在服务端的 id：`db$<工作区 id>$folders`（AFFiNE 前端也这样拼；
-/// 只写 `db$folders` 服务端不给读写）。
+/// 工作区里文件夹树那篇文档在服务端的 id：`db$<工作区 id>$folders`（[`workspace::table_doc_id`]）。
 pub fn folders_doc_id(workspace: &str) -> String {
-    format!("db${workspace}$folders")
+    workspace::table_doc_id(workspace, workspace::FOLDERS)
 }
 
 async fn load_full(affine: &mut impl Affine, ws: &str, id: &str) -> Result<(Doc, bool), Error> {
@@ -357,15 +356,6 @@ fn affine_author(name: Option<&String>) -> Author {
     }
 }
 
-fn blob_at(
-    repo: &ContextRepo,
-    head: Option<ObjectId>,
-    path: &str,
-) -> Result<Option<String>, Error> {
-    let Some(head) = head else { return Ok(None) };
-    Ok(repo.files(head)?.get(path).map(ToString::to_string))
-}
-
 // ---------------------------------------------------------------- AFFiNE 这一边
 
 /// 文档里的条目（标题块 id、标题、正文）。
@@ -457,22 +447,36 @@ pub async fn link(
         .into_iter()
         .map(|d| d.path)
         .collect();
-    let files = files_in(cx.repo, batch.head(), scope)?;
+    let head = batch.head();
+    let files = match head {
+        Some(h) => cx.repo.files(h)?,
+        None => BTreeMap::new(),
+    };
     let wanted: Vec<String> = match file {
-        Some(f) if !files.contains(f) => {
+        Some(f) if !files.contains_key(f) => {
             return Err(Error::Invalid(format!("上下文仓库里没有 {f}")));
         }
         Some(f) => vec![f.to_owned()],
-        None => files.into_iter().collect(),
+        None => files
+            .keys()
+            .filter(|p| scope_of_path(p).as_ref() == Some(scope))
+            .cloned()
+            .collect(),
     };
     let mut report = SyncReport::default();
     for path in wanted {
         if linked.contains(&path) {
             continue;
         }
+        let blob = files.get(&path).copied();
+        let at = GitAt {
+            head,
+            text: blob.map(|b| read_text(cx.repo, b, &path)).transpose()?,
+            blob: blob.map(|b| b.to_string()),
+        };
         report
             .docs
-            .push(link_file(cx, affine, &mut ws, &batch, &row, &path).await?);
+            .push(link_file(cx, affine, &mut ws, &at, &row, &path).await?);
     }
     finish(cx, batch, &mut report, "affine.link", &scope.to_string()).await?;
     Ok(report)
@@ -502,20 +506,23 @@ async fn ensure_scope(
     Ok(row)
 }
 
-/// 范围里的条目文件（照着 `head`）。
-fn files_in(
-    repo: &ContextRepo,
+/// 一个文件在某个提交里的样子。
+struct GitAt {
     head: Option<ObjectId>,
-    scope: &Scope,
-) -> Result<std::collections::BTreeSet<String>, Error> {
-    let Some(head) = head else {
-        return Ok(Default::default());
-    };
-    Ok(repo
-        .files(head)?
-        .into_keys()
-        .filter(|p| scope_of_path(p).as_ref() == Some(scope))
-        .collect())
+    text: Option<String>,
+    blob: Option<String>,
+}
+
+/// 接不上的文件（没有二级标题：整个文件是一条，AFFiNE 里对不上）。
+fn unlinkable(path: &str, text: &str) -> Option<DocReport> {
+    let parsed = parse_file(path, text);
+    if has_h2(text, parsed.body_start) && !parsed.items.is_empty() {
+        return None;
+    }
+    let mut r = DocReport::new(path, None, "skipped");
+    r.notes
+        .push("没有二级标题：整个文件是一条，AFFiNE 里对不上，先不接".to_owned());
+    Some(r)
 }
 
 /// 在 AFFiNE 里给一个文件新建文档：文件开头（第一个二级标题前面，去掉 YAML）照样放进去，每条一个二级标题块。
@@ -523,21 +530,18 @@ async fn link_file(
     cx: &Context<'_>,
     affine: &mut impl Affine,
     ws: &mut Workspace,
-    batch: &Batch,
+    at: &GitAt,
     scope: &AffineScope,
     path: &str,
 ) -> Result<DocReport, Error> {
-    let Some(text) = batch.read(cx.repo, path)? else {
+    let Some(text) = at.text.as_deref() else {
         return Ok(DocReport::new(path, None, "skipped"));
     };
-    let parsed = parse_file(path, &text);
-    if !has_h2(&text, parsed.body_start) || parsed.items.is_empty() {
-        let mut r = DocReport::new(path, None, "skipped");
-        r.notes
-            .push("没有二级标题：整个文件是一条，AFFiNE 里对不上，先不接".to_owned());
+    if let Some(r) = unlinkable(path, text) {
         return Ok(r);
     }
-    let lines = lines_of(&text);
+    let parsed = parse_file(path, text);
+    let lines = lines_of(text);
     let first = parsed.items[0].span.0.min(lines.len());
     let mut blocks = to_blocks(&lines[parsed.body_start.min(first)..first].concat());
     let (items, missing) = git_items(&parsed.items);
@@ -595,8 +599,8 @@ async fn link_file(
                 workspace_id: ws.id.clone(),
                 doc_id: doc_id.clone(),
                 state,
-                git_blob: blob_at(cx.repo, batch.head(), path)?,
-                synced_commit: batch.head().map(|h| h.to_string()),
+                git_blob: at.blob.clone(),
+                synced_commit: at.head.map(|h| h.to_string()),
                 paused: None,
                 synced_at: String::new(),
             },
@@ -637,18 +641,136 @@ async fn finish(
 
 // ---------------------------------------------------------------- 同步一次
 
+/// AFFiNE 里一篇文档取回来的样子。
+struct Fetched {
+    /// 上次同步完的状态加上这次取回来的差量。
+    local: Doc,
+    /// 上次以后 AFFiNE 里改过。
+    moved: bool,
+    /// 服务端没有这篇了。
+    gone: bool,
+}
+
 /// 这一次同步里大家共用的。
+///
+/// 提交队列的锁到要写的时候才拿（[`Run::lock`]）：两边都没变的文档只从 AFFiNE 取一次差量、看一眼 HEAD 里的 blob，
+/// 不拿锁，这期间批准、改单条不用等 AFFiNE。拿锁时（配了远端时先拉）HEAD 和记下的同步状态都可能变了，
+/// 所以拿到以后重新读一遍，手上这篇从头再看。
 struct Run<'r> {
     ws: Workspace,
-    batch: Batch,
-    bases: &'r [AffineBase],
-    conflicts: &'r [AffineConflict],
+    batch: Option<Batch>,
+    /// 还没拿锁时照着的提交。
+    head: Option<ObjectId>,
+    /// 某个提交里的文件（一次同步多半一直照着同一个提交，不用每篇文档都把树走一遍）。
+    files: Option<(Option<ObjectId>, BTreeMap<String, ObjectId>)>,
+    docs: Vec<AffineDoc>,
+    bases: Vec<AffineBase>,
+    conflicts: Vec<AffineConflict>,
     resume: &'r [String],
+    /// 文档 id →（从哪个状态取的，取回来的差量）：拿锁以后记下的状态没变就不再取。
+    fetched: HashMap<String, (Vec<u8>, Option<Vec<u8>>)>,
     /// 文档 id → 最后改的人；要往 git 写的时候才去问。
     editors: Option<HashMap<String, String>>,
 }
 
 impl Run<'_> {
+    fn head(&self) -> Option<ObjectId> {
+        self.batch.as_ref().map_or(self.head, Batch::head)
+    }
+
+    fn files(&mut self, repo: &ContextRepo) -> Result<&BTreeMap<String, ObjectId>, Error> {
+        let head = self.head();
+        let files = match self.files.take() {
+            Some((h, f)) if h == head => f,
+            _ => match head {
+                Some(h) => repo.files(h)?,
+                None => BTreeMap::new(),
+            },
+        };
+        Ok(&self.files.insert((head, files)).1)
+    }
+
+    fn blob(&mut self, repo: &ContextRepo, path: &str) -> Result<Option<String>, Error> {
+        Ok(self.files(repo)?.get(path).map(ToString::to_string))
+    }
+
+    fn read(&mut self, repo: &ContextRepo, path: &str) -> Result<Option<String>, Error> {
+        match self.files(repo)?.get(path).copied() {
+            Some(id) => read_text(repo, id, path).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn git_at(&mut self, repo: &ContextRepo, path: &str) -> Result<GitAt, Error> {
+        Ok(GitAt {
+            head: self.head(),
+            blob: self.blob(repo, path)?,
+            text: self.read(repo, path)?,
+        })
+    }
+
+    fn doc(&self, path: &str) -> Option<AffineDoc> {
+        self.docs.iter().find(|d| d.path == path).cloned()
+    }
+
+    async fn refresh(&mut self, store: &Store) -> Result<(), Error> {
+        self.docs = store.affine_docs().await?;
+        self.bases = store.affine_bases().await?;
+        self.conflicts = store.affine_conflicts().await?;
+        Ok(())
+    }
+
+    /// 拿提交队列的锁，已经拿着了就什么都不做。刚拿到时返回 `true`：HEAD 和记下的同步状态重新读过了，
+    /// 之前看过的要重新看。
+    async fn lock(&mut self, cx: &Context<'_>) -> Result<bool, Error> {
+        if self.batch.is_some() {
+            return Ok(false);
+        }
+        self.batch = Some(begin_batch(cx.repo, cx.store, cx.remote, cx.author).await?);
+        self.refresh(cx.store).await?;
+        Ok(true)
+    }
+
+    /// 做一个提交（要先拿着锁）。
+    fn commit(
+        &mut self,
+        repo: &ContextRepo,
+        edit: FileEdit,
+        message: &str,
+        author: &Author,
+    ) -> Result<ObjectId, Error> {
+        let batch = self.batch.as_mut().ok_or_else(|| {
+            Error::Invalid("没拿提交队列的锁就要写 git（同步程序的错）".to_owned())
+        })?;
+        Ok(batch.commit(repo, &[edit], message, author)?)
+    }
+
+    /// 从记下的状态起取 AFFiNE 里这篇文档的差量。
+    async fn fetch(&mut self, affine: &mut impl Affine, d: &AffineDoc) -> Result<Fetched, Error> {
+        let local = Doc::new();
+        apply_update(&local, &d.state)?;
+        let before = mark(&local);
+        let loaded = match self.fetched.get(&d.doc_id) {
+            Some((from, loaded)) if *from == d.state => loaded.clone(),
+            _ => {
+                let loaded = affine
+                    .load(&self.ws.id, &d.doc_id, Some(&before.state_map.encode_v1()))
+                    .await?;
+                self.fetched
+                    .insert(d.doc_id.clone(), (d.state.clone(), loaded.clone()));
+                loaded
+            }
+        };
+        if let Some(u) = &loaded {
+            apply_update(&local, u)?;
+        }
+        Ok(Fetched {
+            moved: mark(&local) != before,
+            gone: loaded.is_none(),
+            local,
+        })
+    }
+
     async fn editor(&mut self, affine: &mut impl Affine, doc_id: &str) -> Author {
         if self.editors.is_none() {
             // 拿不到名字不影响同步，提交的作者写“AFFiNE”。
@@ -658,135 +780,234 @@ impl Run<'_> {
     }
 }
 
+fn read_text(repo: &ContextRepo, blob: ObjectId, path: &str) -> Result<String, Error> {
+    String::from_utf8(repo.read_blob(blob)?)
+        .map_err(|_| Error::Invalid(format!("{path} 不是 UTF-8 文本，不能同步")))
+}
+
 /// 同步一次：整个接上的范围里新加的文件放进 AFFiNE、文件夹里新建的文档写成文件，再把每篇接上的文档三方比较、写到两边。
 /// `resume` 里的文件停过（一次要归档一半以上的条目、AFFiNE 里移进了回收站、写完读回来对不上），人看过了，这次接着做。
+///
+/// 一开始就拿提交队列的锁（配了远端时先拉）。一直跟着同步的时候（[`crate::follow`]）用 [`sync_docs`]，要写才拿锁。
 pub async fn sync(
     cx: &Context<'_>,
     affine: &mut impl Affine,
     resume: &[String],
 ) -> Result<SyncReport, Error> {
-    let batch = begin_batch(cx.repo, cx.store, cx.remote, cx.author).await?;
+    sync_docs(cx, affine, resume, None, true).await
+}
+
+/// 同步一次，接上的文档只看 `only` 里的（文档 id；`None` 是全部）。整个接上的范围里新加的文件、
+/// 文件夹里新建的文档、移进回收站的文档每次都看。`eager` 是一开始就拿锁，不然到要写的时候才拿。
+pub(crate) async fn sync_docs(
+    cx: &Context<'_>,
+    affine: &mut impl Affine,
+    resume: &[String],
+    only: Option<&HashSet<String>>,
+    eager: bool,
+) -> Result<SyncReport, Error> {
     let ws = Workspace::load(affine, cx.workspace).await?;
-    let scopes = cx.store.affine_scopes().await?;
-    let docs = cx.store.affine_docs().await?;
-    let bases = cx.store.affine_bases().await?;
-    let conflicts = cx.store.affine_conflicts().await?;
     let mut run = Run {
         ws,
-        batch,
-        bases: &bases,
-        conflicts: &conflicts,
+        batch: None,
+        head: cx.repo.head()?,
+        files: None,
+        docs: Vec::new(),
+        bases: Vec::new(),
+        conflicts: Vec::new(),
         resume,
+        fetched: HashMap::new(),
         editors: None,
     };
+    if eager {
+        run.lock(cx).await?;
+    } else {
+        run.refresh(cx.store).await?;
+    }
+    let scopes = cx.store.affine_scopes().await?;
     let mut report = SyncReport::default();
-    let mut known_paths: HashSet<String> = docs.iter().map(|d| d.path.clone()).collect();
-    let mut known_docs: HashSet<String> = docs.iter().map(|d| d.doc_id.clone()).collect();
+    // 这次新接上的（git 里新加的文件、AFFiNE 里新建的文档），后面不再同步。
+    let mut new_paths: HashSet<String> = HashSet::new();
+    let mut new_docs: HashSet<String> = HashSet::new();
 
     for s in scopes.iter().filter(|s| s.workspace_id == cx.workspace) {
         let Ok(scope) = s.scope.parse::<Scope>() else {
             continue;
         };
-        let (folder_id, created) = run.ws.folder_for(&scope, Some(s))?;
-        let row = if created {
-            run.ws.push(affine).await?;
-            let row = AffineScope {
-                folder_id,
-                ..s.clone()
-            };
-            cx.store.put_affine_scope(&row).await?;
-            row
-        } else {
-            s.clone()
-        };
+        let row = scope_folder(cx, affine, &mut run, s, &scope).await?;
         if !row.whole {
             continue;
         }
         // git 里新加的文件。
-        for path in files_in(cx.repo, run.batch.head(), &scope)? {
-            if known_paths.insert(path.clone()) {
-                let r = link_file(cx, affine, &mut run.ws, &run.batch, &row, &path).await?;
-                known_docs.extend(r.doc_id.clone());
-                report.docs.push(r);
+        let in_scope: Vec<String> = run
+            .files(cx.repo)?
+            .keys()
+            .filter(|p| scope_of_path(p).as_ref() == Some(&scope))
+            .cloned()
+            .collect();
+        let linked: HashSet<String> = run.docs.iter().map(|d| d.path.clone()).collect();
+        for path in in_scope {
+            if linked.contains(&path) || new_paths.contains(&path) {
+                continue;
             }
+            let Some(text) = run.read(cx.repo, &path)? else {
+                continue;
+            };
+            if let Some(r) = unlinkable(&path, &text) {
+                report.docs.push(r);
+                continue;
+            }
+            // 拿锁以后 HEAD 可能变了，别处也可能刚接上。
+            run.lock(cx).await?;
+            if run.doc(&path).is_some() {
+                continue;
+            }
+            let at = run.git_at(cx.repo, &path)?;
+            let r = link_file(cx, affine, &mut run.ws, &at, &row, &path).await?;
+            new_paths.insert(path);
+            new_docs.extend(r.doc_id.clone());
+            report.docs.push(r);
         }
         // AFFiNE 里这个文件夹下新建的文档。
-        let new_docs: Vec<String> = workspace::folders(&run.ws.folders)
+        let in_folder: Vec<String> = workspace::folders(&run.ws.folders)
             .into_iter()
             .filter(|n| {
-                n.parent_id.as_deref() == Some(row.folder_id.as_str())
-                    && n.kind == NodeKind::Doc
-                    && !known_docs.contains(&n.data)
+                n.parent_id.as_deref() == Some(row.folder_id.as_str()) && n.kind == NodeKind::Doc
             })
             .map(|n| n.data)
             .collect();
-        for doc_id in new_docs {
-            if run.ws.page(&doc_id).is_none_or(|p| p.trash) {
+        for doc_id in in_folder {
+            if new_docs.contains(&doc_id)
+                || run.docs.iter().any(|d| d.doc_id == doc_id)
+                || run.ws.page(&doc_id).is_none_or(|p| p.trash)
+            {
                 continue;
             }
-            let r = file_from_doc(
-                cx,
-                affine,
-                &mut run,
-                &row,
-                &scope,
-                &doc_id,
-                &mut known_paths,
-            )
-            .await?;
+            let r = file_from_doc(cx, affine, &mut run, &row, &scope, &doc_id, &new_paths).await?;
+            if r.state == "file_created" {
+                new_paths.insert(r.path.clone());
+            }
+            new_docs.insert(doc_id);
             report.docs.push(r);
         }
     }
 
-    for d in docs.iter().filter(|d| d.workspace_id == cx.workspace) {
-        let r = sync_doc(cx, affine, &mut run, d).await?;
+    let trashed: HashSet<String> = workspace::read_meta(&run.ws.root)
+        .pages
+        .into_iter()
+        .filter(|p| p.trash)
+        .map(|p| p.id)
+        .collect();
+    let targets: Vec<String> = run
+        .docs
+        .iter()
+        .filter(|d| d.workspace_id == cx.workspace && !new_paths.contains(&d.path))
+        .filter(|d| {
+            only.is_none_or(|o| o.contains(&d.doc_id))
+                || resume.contains(&d.path)
+                || trashed.contains(&d.doc_id)
+        })
+        .map(|d| d.path.clone())
+        .collect();
+    for path in targets {
+        let r = sync_doc(cx, affine, &mut run, &path).await?;
         report.docs.push(r);
     }
     run.ws.push(affine).await?;
-    finish(cx, run.batch, &mut report, "affine.sync", cx.workspace).await?;
+    if let Some(batch) = run.batch.take() {
+        finish(cx, batch, &mut report, "affine.sync", cx.workspace).await?;
+    }
     Ok(report)
+}
+
+/// 范围的文件夹还在就用它；人在 AFFiNE 里删了就新建一个（要拿锁，记下新的文件夹 id）。
+async fn scope_folder(
+    cx: &Context<'_>,
+    affine: &mut impl Affine,
+    run: &mut Run<'_>,
+    s: &AffineScope,
+    scope: &Scope,
+) -> Result<AffineScope, Error> {
+    let (folder_id, created) = run.ws.folder_for(scope, Some(s))?;
+    if !created {
+        return Ok(s.clone());
+    }
+    run.lock(cx).await?;
+    run.ws.push(affine).await?;
+    let row = AffineScope {
+        folder_id,
+        ..s.clone()
+    };
+    cx.store.put_affine_scope(&row).await?;
+    Ok(row)
+}
+
+/// 跟着同步用：照着现在的 HEAD，哪些接上的文档在 git 里和上次同步完不一样（文档 id），
+/// 整个接上的范围里有没有新加的、接得上的文件。
+pub(crate) fn git_changes(
+    repo: &ContextRepo,
+    workspace: &str,
+    docs: &[AffineDoc],
+    scopes: &[AffineScope],
+) -> Result<(HashSet<String>, bool), Error> {
+    let files = match repo.head()? {
+        Some(h) => repo.files(h)?,
+        None => BTreeMap::new(),
+    };
+    let changed: HashSet<String> = docs
+        .iter()
+        .filter(|d| d.workspace_id == workspace)
+        .filter(|d| files.get(&d.path).map(ToString::to_string) != d.git_blob)
+        .map(|d| d.doc_id.clone())
+        .collect();
+    let linked: HashSet<&str> = docs.iter().map(|d| d.path.as_str()).collect();
+    let whole: Vec<Scope> = scopes
+        .iter()
+        .filter(|s| s.workspace_id == workspace && s.whole)
+        .filter_map(|s| s.scope.parse().ok())
+        .collect();
+    let added = files.iter().any(|(path, id)| {
+        !linked.contains(path.as_str())
+            && scope_of_path(path).is_some_and(|s| whole.contains(&s))
+            && read_text(repo, *id, path).is_ok_and(|t| unlinkable(path, &t).is_none())
+    });
+    Ok((changed, added))
 }
 
 async fn sync_doc(
     cx: &Context<'_>,
     affine: &mut impl Affine,
     run: &mut Run<'_>,
-    d: &AffineDoc,
+    path: &str,
 ) -> Result<DocReport, Error> {
-    let path = d.path.as_str();
     let resumed = run.resume.iter().any(|p| p == path);
+    let (d, local, deleted_in_affine, blob) = loop {
+        let Some(d) = run.doc(path) else {
+            // 别处的同步刚把它断开了。
+            return Ok(DocReport::new(path, None, "unchanged"));
+        };
+        if let Some(why) = &d.paused
+            && !resumed
+        {
+            let mut report = DocReport::new(path, Some(&d.doc_id), "paused");
+            report.paused = Some(why.clone());
+            return Ok(report);
+        }
+        // AFFiNE 这边：从上次的状态起，只取差量。
+        let f = run.fetch(affine, &d).await?;
+        let deleted_in_affine = f.gone || run.ws.page(&d.doc_id).is_some_and(|p| p.trash);
+        // git 这边。
+        let blob = run.blob(cx.repo, path)?;
+        if !resumed && blob == d.git_blob && !f.moved && !deleted_in_affine {
+            return Ok(DocReport::new(path, Some(&d.doc_id), "unchanged"));
+        }
+        if run.lock(cx).await? {
+            continue;
+        }
+        break (d, f.local, deleted_in_affine, blob);
+    };
     let mut report = DocReport::new(path, Some(&d.doc_id), "unchanged");
-    if let Some(why) = &d.paused
-        && !resumed
-    {
-        report.state = "paused";
-        report.paused = Some(why.clone());
-        return Ok(report);
-    }
 
-    // AFFiNE 这边：从上次的状态起，只取差量。
-    let local = Doc::new();
-    apply_update(&local, &d.state)?;
-    let before_load = mark(&local);
-    let loaded = affine
-        .load(
-            &run.ws.id,
-            &d.doc_id,
-            Some(&before_load.state_map.encode_v1()),
-        )
-        .await?;
-    if let Some(u) = &loaded {
-        apply_update(&local, u)?;
-    }
-    let affine_moved = mark(&local) != before_load;
-    let deleted_in_affine = loaded.is_none() || run.ws.page(&d.doc_id).is_some_and(|p| p.trash);
-
-    // git 这边。
-    let head = run.batch.head();
-    let blob = blob_at(cx.repo, head, path)?;
-    if !resumed && blob == d.git_blob && !affine_moved && !deleted_in_affine {
-        return Ok(report);
-    }
     if deleted_in_affine && !resumed {
         let why = format!(
             "AFFiNE 里这篇文档移进了回收站（或删掉了）。要在 git 里也归档整篇的话：tcms affine sync --resume {path}；不要的话在 AFFiNE 里把它恢复"
@@ -797,7 +1018,7 @@ async fn sync_doc(
         return Ok(report);
     }
     let text = match &blob {
-        Some(_) => run.batch.read(cx.repo, path)?,
+        Some(_) => run.read(cx.repo, path)?,
         None => None,
     };
     let parsed = text.as_deref().map(|t| parse_file(path, t));
@@ -1059,17 +1280,17 @@ async fn sync_doc(
     if current != text {
         let author = run.editor(affine, &d.doc_id).await;
         let message = commit_message(path, &report.to_git, &changed_items, &author.name);
-        let commit = run.batch.commit(
+        let commit = run.commit(
             cx.repo,
-            &[FileEdit {
+            FileEdit {
                 path: path.to_owned(),
                 content: current.map(String::into_bytes),
-            }],
+            },
             &message,
             &author,
         )?;
         report.commit = Some(commit.to_string());
-        git_blob = blob_at(cx.repo, Some(commit), path)?;
+        git_blob = run.blob(cx.repo, path)?;
     }
 
     // 存底稿。写失败的那几条不改底稿，下次（处理完以后）再来。
@@ -1116,7 +1337,7 @@ async fn sync_doc(
             doc: AffineDoc {
                 state: full_state(&local),
                 git_blob,
-                synced_commit: run.batch.head().map(|h| h.to_string()),
+                synced_commit: run.head().map(|h| h.to_string()),
                 paused,
                 ..d.clone()
             },
@@ -1136,7 +1357,7 @@ async fn file_from_doc(
     scope_row: &AffineScope,
     scope: &Scope,
     doc_id: &str,
-    known_paths: &mut HashSet<String>,
+    taken: &HashSet<String>,
 ) -> Result<DocReport, Error> {
     let mut report = DocReport::new("", Some(doc_id), "skipped");
     let found = affine.load(&run.ws.id, doc_id, None).await?;
@@ -1170,14 +1391,18 @@ async fn file_from_doc(
             .push(format!("AFFiNE 里的「{title}」还没有二级标题，先不建文件"));
         return Ok(report);
     }
-    let head_files: BTreeMap<String, ObjectId> = match run.batch.head() {
-        Some(h) => cx.repo.files(h)?,
-        None => BTreeMap::new(),
-    };
+    // 要写 git 了。拿锁以后重新看：别处可能刚给它建了文件。
+    run.lock(cx).await?;
+    if let Some(d) = run.docs.iter().find(|d| d.doc_id == doc_id) {
+        report.path = d.path.clone();
+        report.state = "unchanged";
+        return Ok(report);
+    }
     let stem = file_name(&title);
     let mut path = format!("{}/{stem}.md", scope.dir());
     let mut n = 2;
-    while head_files.contains_key(&path) || known_paths.contains(&path) {
+    let head_files = run.files(cx.repo)?;
+    while head_files.contains_key(&path) || taken.contains(&path) {
         path = format!("{}/{stem} {n}.md", scope.dir());
         n += 1;
     }
@@ -1230,16 +1455,15 @@ async fn file_from_doc(
     let ids: Vec<String> = bases.iter().map(|b| b.item_id.clone()).collect();
     report.to_git.added = bases.len();
     let message = commit_message(&path, &report.to_git, &ids, &author.name);
-    let commit = run.batch.commit(
+    let commit = run.commit(
         cx.repo,
-        &[FileEdit {
+        FileEdit {
             path: path.clone(),
             content: text.map(String::into_bytes),
-        }],
+        },
         &message,
         &author,
     )?;
-    known_paths.insert(path.clone());
     cx.store
         .save_affine_doc(&AffineSave {
             doc: AffineDoc {
@@ -1248,7 +1472,7 @@ async fn file_from_doc(
                 workspace_id: run.ws.id.clone(),
                 doc_id: doc_id.to_owned(),
                 state: full_state(&local),
-                git_blob: blob_at(cx.repo, Some(commit), &path)?,
+                git_blob: run.blob(cx.repo, &path)?,
                 synced_commit: Some(commit.to_string()),
                 paused: None,
                 synced_at: String::new(),

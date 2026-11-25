@@ -36,6 +36,8 @@ docker build -t tcms .
 | `TCMS_GIT_USERNAME` | 和令牌一起用的用户名，默认 `x-access-token`（GitHub）；Gitea、GitLab 写自己的用户名 |
 | `TCMS_SYNC_SECS` | 多久和远端同步一次，默认 60 秒；0 是只在批准、改单条（和收到推送通知）时同步 |
 | `TCMS_WEBHOOK_SECRET` | 可选，远端推送通知（webhook）的密钥，至少 16 个字符。配了以后人推上去马上同步，见“推上去马上同步” |
+| `TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD` | 可选，和 AFFiNE 同步时连的 AFFiNE 地址和给本系统建的专门账号（`docs/affine-sync.md` 7.3）。自托管用自己的 CA 时另外挂一个 PEM 文件、设 `TCMS_AFFINE_CA` |
+| `TCMS_AFFINE_WORKSPACE` | 可选，AFFiNE 工作区 id（`tcms affine init` 建）。设了以后服务一直跟着和 AFFiNE 同步，连不上 AFFiNE 不影响别的（`docs/affine-sync.md` 7.4） |
 
 ## 单独部署
 

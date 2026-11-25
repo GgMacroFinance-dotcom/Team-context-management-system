@@ -1,18 +1,21 @@
-//! 同步一次：连真的 PostgreSQL、一个临时的 git 仓库，AFFiNE 换成内存里的假 AFFiNE（只存 Yjs 文档，收发更新）。
-//! 人在 AFFiNE 里的修改用 `affine-doc` 直接改假 AFFiNE 里的文档来模拟。
+//! 同步一次、一直跟着同步：连真的 PostgreSQL、一个临时的 git 仓库，AFFiNE 换成内存里的假 AFFiNE（只存 Yjs 文档，收发更新）。
+//! 人在 AFFiNE 里的修改用 `affine-doc` 直接改假 AFFiNE 里的文档来模拟，跟着同步时再发一个广播。
 //!
 //! 需要环境变量 `TCMS_TEST_DATABASE_URL`，规则和别的集成测试一样：本地没设就跳过，CI 里没设算失败。
 //! 查提交历史用 git 命令行。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::rc::Rc;
+use std::time::Duration;
 
 use affine_sync_client::Error as ClientError;
 use tcms_affine::workspace::{self, NodeKind};
 use tcms_affine::{
-    Affine, Context, Keep, RandomIds, Section, SyncReport, link, resolve, split, status, sync,
-    to_blocks, to_markdown,
+    Affine, Context, Event, FollowEnv, FollowEvent, FollowOptions, Job, Keep, RandomIds, Section,
+    SyncReport, follow, link, resolve, split, status, sync, to_blocks, to_markdown,
 };
 use tcms_core::{ItemId, Scope};
 use tcms_git::{Author, ContextRepo, FileEdit};
@@ -24,6 +27,7 @@ const WS: &str = "ws-test";
 const A: &str = "ctx_01JDX4M6Q8AAAAAAAAAAAAAAAA";
 const B: &str = "ctx_01JDX4M6Q8BBBBBBBBBBBBBBBB";
 const C: &str = "ctx_01JDX4M6Q8CCCCCCCCCCCCCCCC";
+const D: &str = "ctx_01JDX4M6Q8DDDDDDDDDDDDDDDD";
 
 /// 内存里的假 AFFiNE。
 #[derive(Default)]
@@ -90,6 +94,33 @@ impl Memory {
     }
 }
 
+impl Memory {
+    fn load_now(&self, doc: &str, sv: Option<&[u8]>) -> Option<Vec<u8>> {
+        let d = self.docs.get(doc)?;
+        let sv = match sv {
+            Some(b) => StateVector::decode_v1(b).unwrap(),
+            None => StateVector::default(),
+        };
+        Some(d.transact().encode_state_as_update_v1(&sv))
+    }
+
+    fn push_now(&mut self, doc: &str, update: &[u8], create: bool) {
+        assert_eq!(create, !self.docs.contains_key(doc), "{doc}：新建 {create}");
+        self.pushes += 1;
+        let d = self.docs.entry(doc.to_owned()).or_default();
+        d.transact_mut()
+            .apply_update(Update::decode_v1(update).unwrap())
+            .unwrap();
+    }
+
+    fn editors_now(&self) -> HashMap<String, String> {
+        self.docs
+            .keys()
+            .map(|k| (k.clone(), "小王".to_owned()))
+            .collect()
+    }
+}
+
 impl Affine for Memory {
     async fn load(
         &mut self,
@@ -97,14 +128,7 @@ impl Affine for Memory {
         doc: &str,
         sv: Option<&[u8]>,
     ) -> Result<Option<Vec<u8>>, ClientError> {
-        let Some(d) = self.docs.get(doc) else {
-            return Ok(None);
-        };
-        let sv = match sv {
-            Some(b) => StateVector::decode_v1(b).unwrap(),
-            None => StateVector::default(),
-        };
-        Ok(Some(d.transact().encode_state_as_update_v1(&sv)))
+        Ok(self.load_now(doc, sv))
     }
 
     async fn push(
@@ -114,21 +138,51 @@ impl Affine for Memory {
         update: &[u8],
         create: bool,
     ) -> Result<(), ClientError> {
-        assert_eq!(create, !self.docs.contains_key(doc), "{doc}：新建 {create}");
-        self.pushes += 1;
-        let d = self.docs.entry(doc.to_owned()).or_default();
-        d.transact_mut()
-            .apply_update(Update::decode_v1(update).unwrap())
-            .unwrap();
+        self.push_now(doc, update, create);
         Ok(())
     }
 
     async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
-        Ok(self
-            .docs
-            .keys()
-            .map(|k| (k.clone(), "小王".to_owned()))
-            .collect())
+        Ok(self.editors_now())
+    }
+}
+
+/// 跟着同步的测试用：同步程序和测试脚本用同一个假 AFFiNE；脚本模拟人改了以后发一个广播。
+struct Shared {
+    mem: Rc<RefCell<Memory>>,
+    events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+}
+
+impl Affine for Shared {
+    async fn load(
+        &mut self,
+        _ws: &str,
+        doc: &str,
+        sv: Option<&[u8]>,
+    ) -> Result<Option<Vec<u8>>, ClientError> {
+        Ok(self.mem.borrow().load_now(doc, sv))
+    }
+
+    async fn push(
+        &mut self,
+        _ws: &str,
+        doc: &str,
+        update: &[u8],
+        create: bool,
+    ) -> Result<(), ClientError> {
+        self.mem.borrow_mut().push_now(doc, update, create);
+        Ok(())
+    }
+
+    async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
+        Ok(self.mem.borrow().editors_now())
+    }
+
+    async fn next_event(&mut self) -> Event {
+        match self.events.recv().await {
+            Some(e) => e,
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -665,4 +719,136 @@ fn deletions_by_53_bit_clients_are_read() {
     // 再编码一次，id 不变。
     let again = txn.encode_state_as_update_v1(&StateVector::default());
     assert_eq!(again, UPDATE);
+}
+
+/// 跟着同步的日志：每次同步一行（`full:` 或 `docs:`，后面是有变化的文件），出错一行。
+fn describe(ev: &FollowEvent<'_>) -> String {
+    match ev {
+        FollowEvent::Synced(job, r) => {
+            let changed: Vec<String> = r
+                .docs
+                .iter()
+                .filter(|d| !matches!(d.state, "unchanged" | "skipped"))
+                .map(|d| format!("{} {}", d.path, d.state))
+                .collect();
+            let kind = match job {
+                Job::Full => "full",
+                Job::Docs(_) => "docs",
+            };
+            format!("{kind}:{}", changed.join(","))
+        }
+        FollowEvent::Failed(e) => format!("failed:{e}"),
+        FollowEvent::Disconnected(r) => format!("disconnected:{r}"),
+        FollowEvent::Reconnected => "reconnected".to_owned(),
+    }
+}
+
+/// 等到 `ok()`，最多 10 秒。
+async fn wait_for(what: &str, ok: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !ok() {
+        assert!(tokio::time::Instant::now() < deadline, "等不到：{what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn follow_syncs_both_ways_without_holding_the_lock() {
+    let Some((f, affine)) = linked().await else {
+        return;
+    };
+    let doc_id = affine.page_id("数据源");
+    let mem = Rc::new(RefCell::new(affine));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut shared = Shared {
+        mem: mem.clone(),
+        events: rx,
+    };
+    let env = FollowEnv {
+        repo: f.path().to_path_buf(),
+        store: f.store.clone(),
+        workspace: WS.to_owned(),
+        actor: "测试".to_owned(),
+        remote: None,
+        author: Author::default(),
+    };
+    let ms = Duration::from_millis;
+    let opts = FollowOptions {
+        quiet: ms(200),
+        max_wait: ms(2000),
+        git_poll: ms(200),
+        full_every: Duration::from_secs(600),
+        retry: ms(200),
+    };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let log: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let changed = |doc: &str| Event::Changed {
+        workspace: WS.to_owned(),
+        doc: doc.to_owned(),
+    };
+
+    let script = async {
+        // 刚开始全部看一遍：两边都没变。
+        wait_for("第一次同步", || !log.borrow().is_empty()).await;
+        assert_eq!(*log.borrow(), ["full:"]);
+
+        // 人在 AFFiNE 里改了第一条，推来广播：停一下以后写进 git。
+        mem.borrow().human_edit(
+            &doc_id,
+            "CPI 从哪里取",
+            "CPI 从哪里取",
+            "CPI 用国家统计局的数，**季调后**。",
+        );
+        tx.send(changed(&doc_id)).unwrap();
+        wait_for("AFFiNE 里的修改写进 git", || log.borrow().len() >= 2).await;
+        assert_eq!(log.borrow()[1], format!("docs:{MACRO} synced"));
+        assert!(f.read(MACRO).unwrap().contains("**季调后**"));
+        let log_line = f.git(&["log", "-1", "--format=%an%n%B"]);
+        assert!(log_line.starts_with("小王\nAFFiNE："), "{log_line}");
+
+        // 人改了 git 里的第二条（提交、索引）：不用等，写进 AFFiNE。
+        let text = f
+            .read(MACRO)
+            .unwrap()
+            .replace("PMI 用统计局和财新两个。", "PMI 只用统计局的。");
+        f.git_commit(&[put(MACRO, &text)]).await;
+        wait_for("git 里的修改写进 AFFiNE", || {
+            mem.borrow().items(&doc_id)[1].2 == "PMI 只用统计局的。"
+        })
+        .await;
+        wait_for("同步完", || log.borrow().len() >= 3).await;
+        assert_eq!(log.borrow()[2], format!("docs:{MACRO} synced"));
+
+        // 两边都没变的不拿提交队列的锁：别处拿着锁的时候来了广播，照样很快看完。
+        let lock = f.store.begin_commit().await.unwrap();
+        tx.send(changed(&doc_id)).unwrap();
+        wait_for("拿着锁的时候看完", || log.borrow().len() >= 4).await;
+        assert_eq!(log.borrow()[3], "docs:");
+        drop(lock);
+
+        // git 里新加一个文件（整个范围接上了）：接上，在 AFFiNE 里建文档。
+        f.git_commit(&[put(
+            "role-macro/新的.md",
+            &format!("## 新条目\n<!-- ctx id={D} -->\n\n新的一条。\n"),
+        )])
+        .await;
+        wait_for("新文件接上", || {
+            mem.borrow().pages().iter().any(|p| p.title == "新的")
+        })
+        .await;
+        wait_for("同步完", || log.borrow().len() >= 5).await;
+        assert_eq!(log.borrow()[4], "docs:role-macro/新的.md linked");
+        stop.send(true).unwrap();
+    };
+    let follower = follow(&env, &mut shared, opts, stopped, |ev| {
+        log.borrow_mut().push(describe(&ev))
+    });
+    tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(follower, script);
+    })
+    .await
+    .expect("跟着同步没停下来");
+    assert_eq!(log.borrow().len(), 5, "{:?}", log.borrow());
+    let s = status(&f.store).await.unwrap();
+    assert_eq!(s.docs.len(), 3);
 }

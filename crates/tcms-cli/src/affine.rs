@@ -1,17 +1,24 @@
-//! `tcms affine`：和 AFFiNE 同步（`docs/affine-sync.md`）。现在是一次一次跑（A3）；`tcms serve` 里一直跟着同步在 A3 的第二部分。
+//! `tcms affine`：和 AFFiNE 同步（`docs/affine-sync.md`）。可以一次一次跑（`sync`），也可以一直跟着同步
+//! （`follow`；`tcms serve` 设了 `TCMS_AFFINE_WORKSPACE` 时自己会跟着同步，[`follow_forever`]）。
 //!
 //! 连 AFFiNE 的设置都在环境变量里：`TCMS_AFFINE_URL`（比如 `http://127.0.0.1:3010`）、`TCMS_AFFINE_EMAIL`、
 //! `TCMS_AFFINE_PASSWORD`（给本系统建的专门账号），`TCMS_AFFINE_WORKSPACE`（工作区 id，`tcms affine init` 建），
 //! 可选 `TCMS_AFFINE_CA`（自托管用自己的 CA 时的 PEM 文件）。
 
+use std::collections::HashMap;
+use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
-use tcms_affine::{Context, Keep, Server, SyncReport};
+use tcms_affine::{
+    Context, DocReport, FollowEnv, FollowEvent, FollowOptions, Keep, Server, SyncReport,
+};
 use tcms_core::Scope;
-use tcms_git::Remote;
+use tcms_git::{Author, Remote};
 use tcms_store::Store;
+use tokio::sync::watch;
 
 #[derive(Subcommand)]
 pub enum AffineCmd {
@@ -43,6 +50,9 @@ pub enum AffineCmd {
         #[arg(long)]
         json: bool,
     },
+    /// 一直跟着同步（前台跑，Ctrl-C 停）：AFFiNE 里改完停 10 秒、git 里一变就同步，每 5 分钟全部看一遍。
+    /// 两边都没变的不拿提交队列的锁。`tcms serve` 设了 TCMS_AFFINE_WORKSPACE 时自己会跟着同步，不用另外跑这个。
+    Follow,
     /// 接上了哪些范围、文件，哪些停着，哪些条目等人处理。不连 AFFiNE。
     Status {
         /// 用 JSON 输出。
@@ -113,6 +123,28 @@ pub async fn run(
     let workspace = env("TCMS_AFFINE_WORKSPACE")?;
     let actor = crate::actor();
     let author = crate::author();
+    if let AffineCmd::Follow = cmd {
+        let env = FollowEnv {
+            repo: repo_path.to_owned(),
+            store,
+            workspace,
+            actor,
+            remote: remote.cloned(),
+            author,
+        };
+        let (stop, stopped) = watch::channel(false);
+        let run = follow_forever(env, stopped);
+        tokio::pin!(run);
+        tokio::select! {
+            () = &mut run => {}
+            () = crate::serve::shutdown() => {
+                eprintln!("停止中：做完手上这一次同步就停");
+                let _ = stop.send(true);
+                run.await;
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let cx = Context {
         repo: &repo,
         store: &store,
@@ -144,7 +176,9 @@ pub async fn run(
             }
             (tcms_affine::sync(&cx, &mut server, &[]).await?, json)
         }
-        AffineCmd::Init { .. } | AffineCmd::Status { .. } => unreachable!("上面处理过"),
+        AffineCmd::Init { .. } | AffineCmd::Status { .. } | AffineCmd::Follow => {
+            unreachable!("上面处理过")
+        }
     };
     print_report(&report, json)?;
     Ok(if report.needs_attention() {
@@ -152,6 +186,44 @@ pub async fn run(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// 一篇文档这次怎么样了：一行，停着的原因、备注各缩进一行。
+fn doc_lines(d: &DocReport) -> Vec<String> {
+    let state = match d.state {
+        "linked" => "接上了",
+        "file_created" => "AFFiNE 里新建的，建了文件",
+        "synced" => "同步了",
+        "paused" => "停着",
+        "unlinked" => "git 里删了，文档移进了 AFFiNE 的回收站",
+        "skipped" => "没接",
+        "unchanged" => "两边都没变",
+        other => other,
+    };
+    let mut parts = Vec::new();
+    let counts =
+        |c: &tcms_affine::Counts| format!("改 {}、加 {}、删 {}", c.updated, c.added, c.removed);
+    if d.to_git.total() > 0 {
+        parts.push(format!("写进 git：{}", counts(&d.to_git)));
+    }
+    if d.to_affine.total() > 0 {
+        parts.push(format!("写进 AFFiNE：{}", counts(&d.to_affine)));
+    }
+    if d.held > 0 {
+        parts.push(format!("{} 条等人处理", d.held));
+    }
+    let mut lines = vec![format!(
+        "{}  {state}{}",
+        d.path,
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", parts.join("；"))
+        }
+    )];
+    lines.extend(d.paused.iter().map(|p| format!("  {p}")));
+    lines.extend(d.notes.iter().map(|n| format!("  {n}")));
+    lines
 }
 
 fn print_report(report: &SyncReport, json: bool) -> Result<()> {
@@ -165,41 +237,8 @@ fn print_report(report: &SyncReport, json: bool) -> Result<()> {
             quiet += 1;
             continue;
         }
-        let state = match d.state {
-            "linked" => "接上了",
-            "file_created" => "AFFiNE 里新建的，建了文件",
-            "synced" => "同步了",
-            "paused" => "停着",
-            "unlinked" => "git 里删了，文档移进了 AFFiNE 的回收站",
-            "skipped" => "没接",
-            other => other,
-        };
-        let mut parts = Vec::new();
-        let counts =
-            |c: &tcms_affine::Counts| format!("改 {}、加 {}、删 {}", c.updated, c.added, c.removed);
-        if d.to_git.total() > 0 {
-            parts.push(format!("写进 git：{}", counts(&d.to_git)));
-        }
-        if d.to_affine.total() > 0 {
-            parts.push(format!("写进 AFFiNE：{}", counts(&d.to_affine)));
-        }
-        if d.held > 0 {
-            parts.push(format!("{} 条等人处理", d.held));
-        }
-        println!(
-            "{}  {state}{}",
-            d.path,
-            if parts.is_empty() {
-                String::new()
-            } else {
-                format!("（{}）", parts.join("；"))
-            }
-        );
-        if let Some(p) = &d.paused {
-            println!("  {p}");
-        }
-        for n in &d.notes {
-            println!("  {n}");
+        for line in doc_lines(d) {
+            println!("{line}");
         }
     }
     if quiet > 0 {
@@ -222,6 +261,112 @@ fn print_report(report: &SyncReport, json: bool) -> Result<()> {
         println!("有停着的文档或等人处理的条目，用 tcms affine status 看。");
     }
     Ok(())
+}
+
+/// `tcms serve` 里跟着同步的设置：设了 `TCMS_AFFINE_WORKSPACE` 才跟着同步，没设是 `None`。
+pub fn serve_env(
+    store: &Store,
+    repo: &Path,
+    remote: Option<&Remote>,
+    author: Author,
+) -> Option<FollowEnv> {
+    let workspace = std::env::var("TCMS_AFFINE_WORKSPACE")
+        .ok()
+        .map(|w| w.trim().to_owned())
+        .filter(|w| !w.is_empty())?;
+    Some(FollowEnv {
+        repo: repo.to_owned(),
+        store: store.clone(),
+        workspace,
+        actor: crate::actor(),
+        remote: remote.cloned(),
+        author,
+    })
+}
+
+/// 连上 AFFiNE（连不上隔一会儿再试，5 秒起每次翻倍，最多 5 分钟），然后一直跟着同步，直到 `stop` 变成 `true`。
+/// 往标准错误写有变化的文档和出的错。
+pub async fn follow_forever(env: FollowEnv, mut stop: watch::Receiver<bool>) {
+    let mut wait = Duration::from_secs(5);
+    let mut said: Option<String> = None;
+    let mut server = loop {
+        match server().await {
+            Ok(s) => break s,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if said.as_deref() != Some(msg.as_str()) {
+                    eprintln!("AFFiNE 同步：连不上（{msg}），过一会儿再试");
+                    said = Some(msg);
+                }
+            }
+        }
+        tokio::select! {
+            _ = stop.wait_for(|s| *s) => return,
+            () = tokio::time::sleep(wait) => {}
+        }
+        wait = (wait * 2).min(Duration::from_secs(300));
+    };
+    eprintln!(
+        "AFFiNE 同步：连上了，工作区 {}，一直跟着同步（AFFiNE 里改完停 10 秒、git 里一变就同步，每 5 分钟全部看一遍）",
+        env.workspace
+    );
+    let mut log = FollowLog::default();
+    tcms_affine::follow(&env, &mut server, FollowOptions::default(), stop, |ev| {
+        log.on(ev)
+    })
+    .await;
+}
+
+/// 跟着同步时往标准错误写的：只写有变化的文档；同一篇没接、停着，同一个错，只写一次。
+#[derive(Default)]
+struct FollowLog {
+    /// 文件 → 上次写的“没接”“停着”。
+    said: HashMap<String, String>,
+    error: Option<String>,
+}
+
+impl FollowLog {
+    fn on(&mut self, ev: FollowEvent<'_>) {
+        match ev {
+            FollowEvent::Synced(_, report) => {
+                if self.error.take().is_some() {
+                    eprintln!("AFFiNE 同步：又好了");
+                }
+                for d in report.docs.iter().filter(|d| d.state != "unchanged") {
+                    let lines = doc_lines(d);
+                    if matches!(d.state, "skipped" | "paused") {
+                        let text = lines.join("\n");
+                        if self.said.get(&d.path) == Some(&text) {
+                            continue;
+                        }
+                        self.said.insert(d.path.clone(), text);
+                    } else {
+                        self.said.remove(&d.path);
+                    }
+                    for line in lines {
+                        eprintln!("AFFiNE 同步：{line}");
+                    }
+                }
+                if !report.commits.is_empty() {
+                    eprintln!("AFFiNE 同步：提交了 {}", report.commits.join("、"));
+                    if let Some(r) = &report.remote {
+                        eprintln!("AFFiNE 同步：{}", r.summary());
+                    }
+                }
+            }
+            FollowEvent::Failed(e) => {
+                let msg = e.to_string();
+                if self.error.as_deref() != Some(msg.as_str()) {
+                    eprintln!("AFFiNE 同步出错，过一会儿再试：{msg}");
+                    self.error = Some(msg);
+                }
+            }
+            FollowEvent::Disconnected(reason) => {
+                eprintln!("AFFiNE 同步：连接断了（{reason}），在重连")
+            }
+            FollowEvent::Reconnected => eprintln!("AFFiNE 同步：又连上了，全部看一遍"),
+        }
+    }
 }
 
 async fn status(store: &Store, json: bool) -> Result<ExitCode> {

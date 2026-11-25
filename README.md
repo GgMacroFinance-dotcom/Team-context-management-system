@@ -38,6 +38,7 @@ tcms serve --listen 0.0.0.0:7341 --allowed-host ctx.example.com   # 对外提供
 TCMS_TOKEN=tcms_... tcms serve --stdio                        # 给同机、由 agent 启动的进程用
 TCMS_REMOTE=origin tcms sync                                  # 和远端同步一次：拉、更新索引、推（https 远端的令牌放在 TCMS_GIT_TOKEN）
 TCMS_REMOTE=origin TCMS_WEBHOOK_SECRET=... tcms serve        # 再接远端的推送通知 POST /hooks/push，推上去马上同步
+TCMS_AFFINE_WORKSPACE=... tcms serve                         # 再一直跟着和 AFFiNE 同步（连 AFFiNE 的环境变量见 docs/affine-sync.md 7.3、7.4）
 tcms bench index --check                                      # 索引基准
 tcms bench read --check                                       # 读的基准：编包、检索、找晋升候选
 tcms bench serve --check                                      # 服务的基准：起 tcms serve --stdio 子进程，用 MCP 客户端量
