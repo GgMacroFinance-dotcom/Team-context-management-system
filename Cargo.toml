@@ -14,6 +14,7 @@ tcms-core = { path = "crates/tcms-core" }
 tcms-affine = { path = "crates/tcms-affine" }
 affine-doc = { path = "crates/affine-doc" }
 affine-sync-client = { path = "crates/affine-sync-client" }
+affine-store = { path = "crates/affine-store" }
 tcms-git = { path = "crates/tcms-git" }
 tcms-store = { path = "crates/tcms-store" }
 tcms-index = { path = "crates/tcms-index" }
@@ -49,6 +50,8 @@ similar = "2"
 # 开了 small-client 时 yrs 读这样的 id，块里的和删除集合里的截得不一样，网页里删掉的字读不出来删了。
 yrs = { version = "0.28", default-features = false }
 # 和 AFFiNE 的连接（affine-sync-client）：WebSocket 只要握手和帧，TLS 自己接（ring，Mozilla 的根证书，可以再加一个 CA 文件），HTTP 用 hyper 的单连接客户端。
+# AFFiNE 文档的本地存储（affine-store）；bundled：自带 SQLite 源码编，不依赖系统的库。
+rusqlite = { version = "0.43", features = ["bundled"] }
 # 读写 AFFiNE 导出的 .bs.zip；只开 deflate（zlib-rs），不要 zopfli 和加密。
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }

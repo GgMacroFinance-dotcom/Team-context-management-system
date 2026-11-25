@@ -1,0 +1,18 @@
+[package]
+name = "affine-store"
+description = "AFFiNE 文档的本地存储：SQLite 里存文档更新、合并后的快照、时钟、附件，断网时也能改；属于 AFFiNE 内核，不依赖 TCMS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

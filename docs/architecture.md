@@ -9,7 +9,7 @@
 | --- | --- |
 | 真相放在哪里 | 以“git 里的 Markdown”为底（路线 B），拿数据库（路线 A）和 CRDT（路线 C）的长处补它的短处 |
 | 语言 | Rust |
-| 数据库 | 只用 PostgreSQL，不再支持 SQLite。兼容 Supabase，但不整套搬 Supabase |
+| 数据库 | 只用 PostgreSQL，不再支持 SQLite。兼容 Supabase，但不整套搬 Supabase。例外：AFFiNE 内核的 `affine-store` 是给断网编辑用的本地文件（和 AFFiNE 桌面端一样用 SQLite），不放 TCMS 的数据，TCMS 本身不依赖它 |
 | 和 I.P. 的关系 | 智能岗位服务器上，I.P. 和本系统共用同一个 PostgreSQL，各用各的 schema。I.P. 那边的改动在 I.P. 仓库做 |
 | 部署 | 装在打包卖出的智能岗位云服务器上；客户的团队也可以自己改造、换部署方式 |
 | 参考仓库 | `reference/` 里的 AFFiNE、Notion 等只看设计，代码重写 |
@@ -271,8 +271,9 @@ Edited-by: 王审核（tok_01JDX4...）
 | 和 AFFiNE 的连接（`crates/affine-sync-client`）：WebSocket 和自己写的 socket.io 那一层 | tokio-tungstenite 0.29（不开默认特性，只要握手；带进来 tungstenite） | MIT（tungstenite 是 MIT 或 Apache-2.0） |
 | 和 AFFiNE 的连接：TLS、HTTP | tokio-rustls 0.26（ring，不用 aws-lc-rs）、webpki-roots 1、rustls-pki-types 1；hyper 1（只开客户端、http1）、hyper-util、http-body-util；base64 0.22 | MIT 或 Apache-2.0；webpki-roots 是 CDLA-Permissive-2.0 |
 | AFFiNE 导出包（`.bs.zip`）的读写（`affine-doc`） | zip 9（不开默认特性，只开 `deflate-flate2-zlib-rs`：不要 zopfli、加密和别的压缩算法；带进来 flate2、zlib-rs、typed-path） | MIT（flate2、typed-path 是 MIT 或 Apache-2.0，zlib-rs 是 Zlib） |
+| AFFiNE 文档的本地存储（`affine-store`） | rusqlite 0.43（开 `bundled`：自带 SQLite 源码编，用的 libsqlite3-sys 0.40 和 sqlx 锁的是同一个；带进来 hashlink、fallible-iterator、fallible-streaming-iterator，WASM 上才用的 sqlite-wasm-rs、rsqlite-vfs） | MIT（SQLite 本身是公有领域） |
 
-第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），和 AFFiNE 同步第一步 A1 以后 443 个（多了 yrs 和它带进来的 async-lock、event-listener-strategy、smallstr，加上 tcms-affine），把 A1 搬进 affine-doc 以后 444 个（只多了 affine-doc 自己），A2 以后 454 个（多了 tokio-tungstenite、tungstenite 和它带进来的 sha1、digest、block-buffer、crypto-common、cpufeatures（0.2）、data-encoding，tokio-rustls，加上 tcms-affine-client，后来改名 affine-sync-client，个数不变），K2 的导出包以后 461 个（多了 zip 和它带进来的 flate2、typed-path、constant_time_eq、nix、cfg_aliases、zeroize_derive），A3a 没有新的依赖，还是 461 个，都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、constant_time_eq（CC0-1.0 / MIT-0 / Apache-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
+第 2 步之后 `Cargo.lock` 里 383 个 crate（tantivy 带进来 74 个），第 3 步之后 430 个（rmcp、axum 和它们的依赖，加上测试用的 MCP 客户端带进来的 reqwest），第 4 步之后 432 个（多了 similar 和 tcms-write；regex 之前就在），第 5 步之后 436 个（axum 的 json、query 特性带进来 serde_path_to_error、serde_urlencoded、ryu，加上 tcms-review；tower、http-body-util 之前就在），换成 jemalloc 以后 438 个（多了 tikv-jemallocator、tikv-jemalloc-sys；cc、libc 之前就在），和 AFFiNE 同步第一步 A1 以后 443 个（多了 yrs 和它带进来的 async-lock、event-listener-strategy、smallstr，加上 tcms-affine），把 A1 搬进 affine-doc 以后 444 个（只多了 affine-doc 自己），A2 以后 454 个（多了 tokio-tungstenite、tungstenite 和它带进来的 sha1、digest、block-buffer、crypto-common、cpufeatures（0.2）、data-encoding，tokio-rustls，加上 tcms-affine-client，后来改名 affine-sync-client，个数不变），K2 的导出包以后 461 个（多了 zip 和它带进来的 flate2、typed-path、constant_time_eq、nix、cfg_aliases、zeroize_derive），K4 的本地存储以后 468 个（多了 rusqlite、hashlink、fallible-iterator、fallible-streaming-iterator、sqlite-wasm-rs、rsqlite-vfs，加上 affine-store；libsqlite3-sys 之前就在），A3a 没有新的依赖，还是 461 个，都可以按 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 这类宽松许可用。有几个是多选一、选项里带别的许可：htmlescape（Apache-2.0 / MIT / MPL-2.0）、constant_time_eq（CC0-1.0 / MIT-0 / Apache-2.0）、ryu（Apache-2.0 / BSL-1.0）、r-efi（两个版本，MIT / Apache-2.0 / LGPL-2.1），都按 MIT 或 Apache-2.0 用（ryu 按 Apache-2.0）；matchit（axum 的路由）是 MIT 加 BSD-3-Clause，两个都是宽松许可；webpki-roots 是 CDLA-Permissive-2.0（证书数据的宽松许可，第 1 步就有）。
 
 ## 10. 基准
 

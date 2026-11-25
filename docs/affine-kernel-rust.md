@@ -154,6 +154,18 @@ A2（TCMS #26）合并以后，把 `crates/tcms-affine-client` 原样改名成 `
 - 和真 AFFiNE 对照：拿 5.5 的 17 个模板包跑了忽略的测试 `export_affine_bundle_to_markdown`（`AFFINE_DOC_BUNDLE=<文件>`），18 篇都导出来了，用到的图片都找得到附件。onboarding 的两篇有文字、待办、嵌套列表、表格、数据库（看板）、公式、图片，导出来的样子人工看过；白板模板只有标题，其余在白板上，按设计不导出。
 - 没做：Markdown 里的表格、图片导进 AFFiNE 变成表格块、图片块。这要改同步用的块模型（`model::Content`）和 `tcms-affine` 的同步，单独再提。
 
+### 5.7 K4 第一个 PR 做了什么（2026-11-25）
+
+- 新 crate `crates/affine-store`（MIT）：一个工作区一个 SQLite 文件，存文档更新、合并后的快照、时钟、附件。设计参考 AFFiNE 桌面端 `affine_nbstore`（MIT，只读了设计），不依赖它链接的 AGPL crate；表结构是自己的，比它少（没有本地索引、工作区清单）。
+  - 每篇文档 = 快照 + 后来的更新。`get_doc` 把它们合成一份（yrs 的 `merge_updates_v1`），同一个事务里写回快照、删掉合进去的更新。`get_doc_diff` 按对方的状态向量给差量。
+  - 每篇文档一个毫秒时钟，每来一个更新往前走，一篇文档里严格递增（同一毫秒或系统时间往回拨就加一）。
+  - 对每个对方（比如一台 AFFiNE 服务端）记对方的时钟、拉到的时钟、推过的本地时钟，都只往前走。`docs_to_push` 列出本地比推过的新的文档，`docs_to_pull` 列出对方比拉到的新的。
+  - 附件按 `blobId` 存内容、MIME、大小，能标记删除、彻底删除；`blobs_to_upload` 列出还没传给对方的。
+  - 接口是同步的（rusqlite），异步代码里用 `spawn_blocking`。表结构版本记在 SQLite 的 `user_version`，遇到更新的版本拒绝打开。
+- 和 `architecture.md` 里“只用 PostgreSQL”的关系：这是 AFFiNE 内核给断网编辑用的本地文件，不放 TCMS 的数据，TCMS 不依赖它；`architecture.md` 那一条写明了这个例外。
+- 测试：9 个，都用内存库或临时目录里的文件。更新合成快照；关掉再打开数据还在（重启）；断网时本地改两次、服务端别人也改，连上后按状态向量推差量、拉对方的改动，两边一样、谁的字都在（两端同时改）；时钟只往前走；整篇快照只在更新时才换；坏更新不写；附件和上传记录；删文档；拒绝更新的表结构。都是本地造的数据，没连 AFFiNE。
+- 下一步（K4 第二个 PR）：把它接到 `affine-sync-client` 上，断网时写本地、连上后按 `docs_to_push` 补推、按服务端的时间戳拉，对着 Docker 里的 AFFiNE 试一次断网再连上。
+
 合计约 6 到 8 个 PR、5 到 7 周（两位工程师加 Claude；Claude 能写大部分代码，工程师主要读代码和对真 AFFiNE 验收）。
 
 ## 6. 乙要做什么（只列出来，先不做）
