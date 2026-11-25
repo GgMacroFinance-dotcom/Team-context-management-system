@@ -142,6 +142,8 @@ async fn handle(mut stream: TcpStream, password: &str, seen: Arc<Mutex<Seen>>, k
     send_text(&mut ws, r#"40{"sid":"s"}"#.into()).await;
     let mut ping = tokio::time::interval(Duration::from_millis(100));
     let mut broadcasted = false;
+    // 文档 stale 头一次取、头一次推都说加入作废了（服务端的权限换了一代）。
+    let mut expired: std::collections::HashSet<&str> = std::collections::HashSet::new();
     loop {
         tokio::select! {
             _ = kill.notified() => return,
@@ -163,6 +165,12 @@ async fn handle(mut stream: TcpStream, password: &str, seen: Arc<Mutex<Seen>>, k
                 seen.lock().unwrap().events.push((conn, name.clone(), data.clone()));
                 let reply = match name.as_str() {
                     "space:join-batch" => json!({"data": {"clientId": "s", "success": true, "protocolVersion": 1}}),
+                    "space:load-doc" if data["docId"] == "stale" && expired.insert("load") => {
+                        json!({"error": {"name": "NOT_IN_SPACE", "message": "not in space"}})
+                    }
+                    "space:push-doc-update" if data["docId"] == "stale" && expired.insert("push") => {
+                        json!({"error": {"name": "SYNC_PERMISSION_GENERATION_CHANGED", "message": "changed"}})
+                    }
                     "space:load-doc" if data["docId"] == "missing" => {
                         json!({"error": {"name": "DOC_NOT_FOUND", "message": "Doc missing not found"}})
                     }
@@ -338,6 +346,27 @@ async fn sync_protocol_against_a_fake_server() {
     let seen = fake.seen.lock().unwrap();
     assert!(seen.pongs > 0, "要回服务端的心跳");
     assert!(seen.cookies.iter().all(|c| c.contains("affine_session=s1")));
+}
+
+#[tokio::test]
+async fn expired_join_is_renewed_once() {
+    let fake = Fake::start("right").await;
+    let conn = fake.client("right").sync().await.unwrap();
+    let joins_for = |doc: &str| {
+        fake.events("space:join-batch")
+            .iter()
+            .filter(|(_, v)| v["spaces"][0]["docId"] == doc)
+            .count()
+    };
+    assert!(conn.load_doc("w", "stale", None).await.unwrap().is_some());
+    assert_eq!(joins_for("stale"), 2, "被拒以后要重新加入");
+    assert_eq!(fake.events("space:load-doc").len(), 2);
+    let pushed = conn.push_update("w", "stale", &[1], Intent::Update).await;
+    assert_eq!(pushed.unwrap().timestamp, 9);
+    assert_eq!(joins_for("stale"), 3);
+    assert_eq!(fake.events("space:push-doc-update").len(), 2);
+    // 只再试一次：别的错照样返回。
+    assert!(conn.load_doc("w", "missing", None).await.unwrap().is_none());
 }
 
 #[tokio::test]
