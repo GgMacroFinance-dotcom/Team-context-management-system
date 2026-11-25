@@ -1,5 +1,7 @@
 //! 和 AFFiNE 同步的几张表（迁移 0007，`docs/affine-sync.md` 5.1）。只有同步程序用。
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 use sqlx::Row;
 
@@ -69,15 +71,14 @@ pub struct AffineScope {
     pub whole: bool,
 }
 
-/// 接上的一个文件。
+/// 接上的一个文件。上次同步完整篇文档的 Yjs 状态不在这里（1 万条时有十几 MB），要用时
+/// [`Store::affine_doc_states`] 按文件取。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffineDoc {
     pub path: String,
     pub scope: String,
     pub workspace_id: String,
     pub doc_id: String,
-    /// 上次同步完整篇文档的 Yjs 状态。
-    pub state: Vec<u8>,
     pub git_blob: Option<String>,
     pub synced_commit: Option<String>,
     pub paused: Option<String>,
@@ -119,11 +120,50 @@ pub struct AffineConflict {
 #[derive(Debug, Clone)]
 pub struct AffineSave {
     pub doc: AffineDoc,
+    /// 同步完整篇文档的 Yjs 状态（v1 编码）。
+    pub state: Vec<u8>,
     /// 新的或改了的底稿。
     pub set: Vec<AffineBase>,
     /// 去掉这些条目的底稿（只去掉还在这个文件下的）。
     pub remove: Vec<String>,
     pub conflicts: Vec<AffineConflict>,
+}
+
+fn base_of(r: &sqlx::postgres::PgRow) -> Result<AffineBase> {
+    Ok(AffineBase {
+        item_id: r.try_get("item_id")?,
+        path: r.try_get("path")?,
+        heading_id: r.try_get("heading_id")?,
+        title: r.try_get("base_title")?,
+        body: r.try_get("base_body")?,
+    })
+}
+
+fn conflict_of(r: &sqlx::postgres::PgRow) -> Result<AffineConflict> {
+    Ok(AffineConflict {
+        id: r.try_get("id")?,
+        path: r.try_get("path")?,
+        item_id: r.try_get("item_id")?,
+        heading_id: r.try_get("heading_id")?,
+        reason: r.try_get("reason")?,
+        message: r.try_get("message")?,
+        git_title: r.try_get("git_title")?,
+        git_body: r.try_get("git_body")?,
+        affine_title: r.try_get("affine_title")?,
+        affine_body: r.try_get("affine_body")?,
+        base_title: r.try_get("base_title")?,
+        base_body: r.try_get("base_body")?,
+        found_at: r.try_get("found_at")?,
+    })
+}
+
+/// 取等人处理的那几列（`concat!` 拼进查询，查询还是写死的字符串）。
+macro_rules! conflict_columns {
+    () => {
+        "id, path, item_id, heading_id, reason, message, git_title, git_body, affine_title, \
+         affine_body, base_title, base_body, \
+         to_char(found_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS found_at"
+    };
 }
 
 fn doc_of(r: &sqlx::postgres::PgRow) -> Result<AffineDoc> {
@@ -132,7 +172,6 @@ fn doc_of(r: &sqlx::postgres::PgRow) -> Result<AffineDoc> {
         scope: r.try_get("scope")?,
         workspace_id: r.try_get("workspace_id")?,
         doc_id: r.try_get("doc_id")?,
-        state: r.try_get("state")?,
         git_blob: r.try_get("git_blob")?,
         synced_commit: r.try_get("synced_commit")?,
         paused: r.try_get("paused")?,
@@ -176,16 +215,30 @@ impl Store {
         Ok(())
     }
 
-    /// 接上的文件，按路径排。
+    /// 接上的文件，按路径排（不带 Yjs 状态）。
     pub async fn affine_docs(&self) -> Result<Vec<AffineDoc>> {
         let rows = sqlx::query(
-            "SELECT path, scope, workspace_id, doc_id, state, git_blob, synced_commit, paused, \
+            "SELECT path, scope, workspace_id, doc_id, git_blob, synced_commit, paused, \
                     to_char(synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS synced_at \
              FROM affine_docs ORDER BY path",
         )
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(doc_of).collect()
+    }
+
+    /// 这几个文件上次同步完整篇文档的 Yjs 状态，按路径。没接上的不在里面。
+    pub async fn affine_doc_states(&self, paths: &[String]) -> Result<HashMap<String, Vec<u8>>> {
+        if paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query("SELECT path, state FROM affine_docs WHERE path = ANY($1)")
+            .bind(paths)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|r| Ok((r.try_get("path")?, r.try_get("state")?)))
+            .collect()
     }
 
     /// 所有条目的底稿，按文件、条目排。
@@ -195,48 +248,57 @@ impl Store {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
-            .map(|r| {
-                Ok(AffineBase {
-                    item_id: r.try_get("item_id")?,
-                    path: r.try_get("path")?,
-                    heading_id: r.try_get("heading_id")?,
-                    title: r.try_get("base_title")?,
-                    body: r.try_get("base_body")?,
-                })
-            })
-            .collect()
+        rows.iter().map(base_of).collect()
+    }
+
+    /// 这几条的底稿（没接上的不在里面），按条目排。
+    pub async fn affine_bases_of(&self, item_ids: &[String]) -> Result<Vec<AffineBase>> {
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT item_id, path, heading_id, base_title, base_body FROM affine_items WHERE item_id = ANY($1) ORDER BY item_id",
+        )
+        .bind(item_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(base_of).collect()
+    }
+
+    /// 一个文件里条目的底稿，按条目排。
+    pub async fn affine_bases_at(&self, path: &str) -> Result<Vec<AffineBase>> {
+        let rows = sqlx::query(
+            "SELECT item_id, path, heading_id, base_title, base_body FROM affine_items WHERE path = $1 ORDER BY item_id",
+        )
+        .bind(path)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(base_of).collect()
     }
 
     /// 等人处理的，早的在前。
     pub async fn affine_conflicts(&self) -> Result<Vec<AffineConflict>> {
-        let rows = sqlx::query(
-            "SELECT id, path, item_id, heading_id, reason, message, git_title, git_body, affine_title, \
-                    affine_body, base_title, base_body, \
-                    to_char(found_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS found_at \
-             FROM affine_conflicts ORDER BY id",
-        )
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            conflict_columns!(),
+            " FROM affine_conflicts ORDER BY id"
+        ))
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
-            .map(|r| {
-                Ok(AffineConflict {
-                    id: r.try_get("id")?,
-                    path: r.try_get("path")?,
-                    item_id: r.try_get("item_id")?,
-                    heading_id: r.try_get("heading_id")?,
-                    reason: r.try_get("reason")?,
-                    message: r.try_get("message")?,
-                    git_title: r.try_get("git_title")?,
-                    git_body: r.try_get("git_body")?,
-                    affine_title: r.try_get("affine_title")?,
-                    affine_body: r.try_get("affine_body")?,
-                    base_title: r.try_get("base_title")?,
-                    base_body: r.try_get("base_body")?,
-                    found_at: r.try_get("found_at")?,
-                })
-            })
-            .collect()
+        rows.iter().map(conflict_of).collect()
+    }
+
+    /// 一个文件里等人处理的，早的在前。
+    pub async fn affine_conflicts_at(&self, path: &str) -> Result<Vec<AffineConflict>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            conflict_columns!(),
+            " FROM affine_conflicts WHERE path = $1 ORDER BY id"
+        ))
+        .bind(path)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(conflict_of).collect()
     }
 
     /// 存一篇文档这次同步的结果：文档的状态、底稿、新记下的冲突，在一个事务里。
@@ -254,7 +316,7 @@ impl Store {
         .bind(&d.scope)
         .bind(&d.workspace_id)
         .bind(&d.doc_id)
-        .bind(&d.state)
+        .bind(&save.state)
         .bind(&d.git_blob)
         .bind(&d.synced_commit)
         .bind(&d.paused)

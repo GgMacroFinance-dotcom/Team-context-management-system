@@ -601,12 +601,12 @@ async fn link_file(
                 scope: scope.scope.clone(),
                 workspace_id: ws.id.clone(),
                 doc_id: doc_id.clone(),
-                state,
                 git_blob: at.blob.clone(),
                 synced_commit: at.head.map(|h| h.to_string()),
                 paused: None,
                 synced_at: String::new(),
             },
+            state,
             set: bases,
             remove: Vec::new(),
             conflicts: Vec::new(),
@@ -666,9 +666,11 @@ struct Run<'r> {
     head: Option<ObjectId>,
     /// 某个提交里的文件（一次同步多半一直照着同一个提交，不用每篇文档都把树走一遍）。
     files: Option<(Option<ObjectId>, BTreeMap<String, ObjectId>)>,
+    /// 接上的文档（不带 Yjs 状态）。
     docs: Vec<AffineDoc>,
-    bases: Vec<AffineBase>,
-    conflicts: Vec<AffineConflict>,
+    /// 路径 → 上次同步完整篇文档的 Yjs 状态。只取要同步的几篇：1 万条时全部有十几 MB，
+    /// 跟着同步时改一条只同步一篇。底稿和等人处理的也不在这里，拿着锁以后按文件取（[`sync_doc`]）。
+    states: HashMap<String, Vec<u8>>,
     resume: &'r [String],
     /// 文档 id →（从哪个状态取的，取回来的差量）：拿锁以后记下的状态没变就不再取。
     fetched: HashMap<String, (Vec<u8>, Option<Vec<u8>>)>,
@@ -716,11 +718,30 @@ impl Run<'_> {
         self.docs.iter().find(|d| d.path == path).cloned()
     }
 
+    /// 重新读接上的文档；取过状态的几篇，状态也重新取。
     async fn refresh(&mut self, store: &Store) -> Result<(), Error> {
         self.docs = store.affine_docs().await?;
-        self.bases = store.affine_bases().await?;
-        self.conflicts = store.affine_conflicts().await?;
+        let paths: Vec<String> = self.states.keys().cloned().collect();
+        self.states = store.affine_doc_states(&paths).await?;
         Ok(())
+    }
+
+    /// 这几篇还没取过状态的，一次取来。
+    async fn load_states(&mut self, store: &Store, paths: &[String]) -> Result<(), Error> {
+        let missing: Vec<String> = paths
+            .iter()
+            .filter(|p| !self.states.contains_key(*p))
+            .cloned()
+            .collect();
+        let got = store.affine_doc_states(&missing).await?;
+        self.states.extend(got);
+        Ok(())
+    }
+
+    /// 一篇文档上次同步完的状态。别处的同步刚把它断开了就没有。
+    async fn state(&mut self, store: &Store, path: &str) -> Result<Option<Vec<u8>>, Error> {
+        self.load_states(store, &[path.to_owned()]).await?;
+        Ok(self.states.get(path).cloned())
     }
 
     /// 拿提交队列的锁，已经拿着了就什么都不做。刚拿到时返回 `true`：HEAD 和记下的同步状态重新读过了，
@@ -748,19 +769,24 @@ impl Run<'_> {
         Ok(batch.commit(repo, &[edit], message, author)?)
     }
 
-    /// 从记下的状态起取 AFFiNE 里这篇文档的差量。
-    async fn fetch(&mut self, affine: &mut impl Affine, d: &AffineDoc) -> Result<Fetched, Error> {
+    /// 从记下的状态 `state` 起取 AFFiNE 里这篇文档的差量。
+    async fn fetch(
+        &mut self,
+        affine: &mut impl Affine,
+        d: &AffineDoc,
+        state: Vec<u8>,
+    ) -> Result<Fetched, Error> {
         let local = Doc::new();
-        apply_update(&local, &d.state)?;
+        apply_update(&local, &state)?;
         let before = mark(&local);
         let loaded = match self.fetched.get(&d.doc_id) {
-            Some((from, loaded)) if *from == d.state => loaded.clone(),
+            Some((from, loaded)) if *from == state => loaded.clone(),
             _ => {
                 let loaded = affine
                     .load(&self.ws.id, &d.doc_id, Some(&before.state_map.encode_v1()))
                     .await?;
                 self.fetched
-                    .insert(d.doc_id.clone(), (d.state.clone(), loaded.clone()));
+                    .insert(d.doc_id.clone(), (state, loaded.clone()));
                 loaded
             }
         };
@@ -816,8 +842,7 @@ pub(crate) async fn sync_docs(
         head: cx.repo.head()?,
         files: None,
         docs: Vec::new(),
-        bases: Vec::new(),
-        conflicts: Vec::new(),
+        states: HashMap::new(),
         resume,
         fetched: HashMap::new(),
         editors: None,
@@ -912,6 +937,7 @@ pub(crate) async fn sync_docs(
         })
         .map(|d| d.path.clone())
         .collect();
+    run.load_states(cx.store, &targets).await?;
     for path in targets {
         let r = sync_doc(cx, affine, &mut run, &path).await?;
         report.docs.push(r);
@@ -985,7 +1011,7 @@ async fn sync_doc(
 ) -> Result<DocReport, Error> {
     let resumed = run.resume.iter().any(|p| p == path);
     let (d, local, deleted_in_affine, blob) = loop {
-        let Some(d) = run.doc(path) else {
+        let (Some(d), Some(state)) = (run.doc(path), run.state(cx.store, path).await?) else {
             // 别处的同步刚把它断开了。
             return Ok(DocReport::new(path, None, "unchanged"));
         };
@@ -997,7 +1023,7 @@ async fn sync_doc(
             return Ok(report);
         }
         // AFFiNE 这边：从上次的状态起，只取差量。
-        let f = run.fetch(affine, &d).await?;
+        let f = run.fetch(affine, &d, state).await?;
         let deleted_in_affine = f.gone || run.ws.page(&d.doc_id).is_some_and(|p| p.trash);
         // git 这边。
         let blob = run.blob(cx.repo, path)?;
@@ -1039,21 +1065,23 @@ async fn sync_doc(
     } else {
         affine_items(&local)?
     };
-    let doc_bases: Vec<plan::Base> = run
-        .bases
-        .iter()
-        .filter(|b| b.path == path)
+    // 底稿和等人处理的：拿着锁，只取这一篇的。
+    let doc_bases: Vec<plan::Base> = cx
+        .store
+        .affine_bases_at(path)
+        .await?
+        .into_iter()
         .map(|b| plan::Base {
-            item_id: b.item_id.clone(),
-            heading_id: b.heading_id.clone(),
-            title: b.title.clone(),
-            body: b.body.clone(),
+            item_id: b.item_id,
+            heading_id: b.heading_id,
+            title: b.title,
+            body: b.body,
         })
         .collect();
     let mut pending = Pending::default();
-    for c in run.conflicts.iter().filter(|c| c.path == path) {
-        pending.item_ids.extend(c.item_id.clone());
-        pending.heading_ids.extend(c.heading_id.clone());
+    for c in cx.store.affine_conflicts_at(path).await? {
+        pending.item_ids.extend(c.item_id);
+        pending.heading_ids.extend(c.heading_id);
     }
     let mut new_id = || ItemId::generate().to_string();
     let plan = plan::plan(&git, &affine_now, &doc_bases, &pending, &mut new_id);
@@ -1338,12 +1366,12 @@ async fn sync_doc(
     cx.store
         .save_affine_doc(&AffineSave {
             doc: AffineDoc {
-                state: full_state(&local),
                 git_blob,
                 synced_commit: run.head().map(|h| h.to_string()),
                 paused,
                 ..d.clone()
             },
+            state: full_state(&local),
             set,
             remove,
             conflicts: held.iter().map(|h| held_row(path, h)).collect(),
@@ -1474,12 +1502,12 @@ async fn file_from_doc(
                 scope: scope_row.scope.clone(),
                 workspace_id: run.ws.id.clone(),
                 doc_id: doc_id.to_owned(),
-                state: full_state(&local),
                 git_blob: run.blob(cx.repo, &path)?,
                 synced_commit: Some(commit.to_string()),
                 paused: None,
                 synced_at: String::new(),
             },
+            state: full_state(&local),
             set: bases,
             remove: Vec::new(),
             conflicts: held.iter().map(|h| held_row(&path, h)).collect(),

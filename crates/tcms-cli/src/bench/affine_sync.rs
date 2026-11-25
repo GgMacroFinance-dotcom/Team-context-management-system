@@ -39,11 +39,11 @@ use super::{ITEMS_PER_FILE, Percentiles, ms, percentiles, rss_kb, temp_schema};
 const LINK_LIMIT_1K: Duration = Duration::from_secs(2);
 /// 全部看一遍、两边都没变（1 千条），p95 的门槛（条数不同时按比例换算）。
 const FULL_LIMIT_1K: Duration = Duration::from_millis(200);
-/// AFFiNE 里改一条到 git 里提交完，p95 的门槛。
+/// AFFiNE 里改一条到 git 里提交完，p95 的门槛。不随条数换算：只同步改了的那一篇（`docs/affine-sync.md` 7.8）。
 const TO_GIT_LIMIT: Duration = Duration::from_millis(250);
-/// git 里改一条到写进 AFFiNE，p95 的门槛。
+/// git 里改一条到写进 AFFiNE，p95 的门槛。不随条数换算。
 const TO_AFFINE_LIMIT: Duration = Duration::from_millis(250);
-/// 看一遍评论（100 条都发过），p95 的门槛。
+/// 看一遍评论（100 条都发过），p95 的门槛。不随条数换算。
 const COMMENTS_LIMIT: Duration = Duration::from_millis(100);
 /// 跟着同步、空闲时多用的物理内存的门槛。
 const MEMORY_LIMIT_MB: i64 = 20;

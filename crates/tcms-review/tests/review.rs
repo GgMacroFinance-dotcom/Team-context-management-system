@@ -1334,7 +1334,6 @@ fn affine_doc(path: &str, doc_id: &str, paused: Option<&str>) -> AffineDoc {
         scope: "role:macro".to_owned(),
         workspace_id: WS.to_owned(),
         doc_id: doc_id.to_owned(),
-        state: Vec::new(),
         git_blob: None,
         synced_commit: None,
         paused: paused.map(str::to_owned),
@@ -1394,6 +1393,7 @@ async fn seed_affine(f: &Fixture) {
     let src = "role-macro/数据源.md";
     s.save_affine_doc(&AffineSave {
         doc: affine_doc(src, "doc-src", None),
+        state: Vec::new(),
         set: vec![affine_base(
             src,
             MACRO,
@@ -1424,6 +1424,7 @@ async fn seed_affine(f: &Fixture) {
             "doc-cal",
             Some("AFFiNE 里一次删掉了 2 条里的 2 条，没有在 git 里归档"),
         ),
+        state: Vec::new(),
         set: vec![
             affine_base(cal, OLD, "h-old", "旧的发布日历", "2019 年的。"),
             affine_base(cal, LATER, "h-later", "以后的发布日历", TABLE),
