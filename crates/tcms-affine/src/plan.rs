@@ -25,10 +25,15 @@ impl GitItem {
         Self {
             id: id.into(),
             title: title.into(),
-            readonly: to_blocks(&body).iter().any(Block::is_lossy),
+            readonly: readonly(&body),
             body,
         }
     }
+}
+
+/// 这段正文有没有 AFFiNE 表示不全的写法（表格、图片、HTML……）：有的话写进 AFFiNE 只能看，那边改了不往回写。
+pub fn readonly(body: &str) -> bool {
+    to_blocks(body).iter().any(Block::is_lossy)
 }
 
 /// AFFiNE 里的一条（文档里的顺序）。

@@ -158,6 +158,7 @@ async fn http(live: Arc<Live>, args: ServeArgs) -> Result<()> {
         ReviewOptions {
             allowed_hosts: args.allowed_hosts.clone(),
             author_email: std::env::var("TCMS_GIT_EMAIL").unwrap_or_default(),
+            affine: affine.as_ref().map(|env| env.link.clone()),
         },
     ));
     let app = match hook {

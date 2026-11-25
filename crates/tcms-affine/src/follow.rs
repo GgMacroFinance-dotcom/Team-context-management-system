@@ -10,14 +10,19 @@
 //!
 //! 每次同步都看一遍新文件、新文档和回收站；接上的文档只看要看的那几篇，两边都没变的不拿提交队列的锁
 //! （[`crate::bridge`] 的“同步一次”）。
+//!
+//! 和审核页共用一个 [`FollowLink`]：审核页从它看现在怎么样了（连没连着、上次同步、出的错），
+//! 人在审核页处理完等人处理的、让停着的文档接着做以后，通过它让这边马上同步那几篇。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use serde::Serialize;
 use tcms_git::{Author, ContextRepo, ObjectId, Remote};
 use tcms_store::{PgListener, Store};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
 use crate::bridge::{Context, Error, SyncReport, folders_doc_id, git_changes, sync_docs};
@@ -172,6 +177,155 @@ impl Schedule {
     }
 }
 
+/// 和 AFFiNE 的连接。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Connection {
+    /// 这个进程没跟着同步。
+    #[default]
+    Off,
+    /// 还没连上（连不上时隔一会儿再试）。
+    Connecting,
+    Connected,
+    /// 断了，后台在重连。
+    Disconnected,
+}
+
+/// 跟着同步现在的样子。只在内存里，服务重启以后从头记。时间都是 Unix 毫秒。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FollowState {
+    pub connection: Connection,
+    /// 跟着同步的工作区。
+    pub workspace: String,
+    /// 连接变成现在这样的时候。
+    pub since_ms: Option<u64>,
+    /// 最近一次同步完（不管有没有改动）。
+    pub last_sync_ms: Option<u64>,
+    /// 最近一次同步往 git 或 AFFiNE 写了东西。
+    pub last_change_ms: Option<u64>,
+    /// 最近一次出的错；之后同步成了就清掉。
+    pub error: Option<String>,
+    pub error_ms: Option<u64>,
+}
+
+/// 排着等同步的（人在审核页处理完、还没同步的）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Queued {
+    /// 马上同步的文档 id（跟着同步的一方拿走以后就不在这里了）。
+    pub docs: Vec<String>,
+    /// 接着做的文件（停着的，人看过了）。同步成了才去掉。
+    pub resume: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct LinkInner {
+    state: Mutex<FollowState>,
+    queued: Mutex<(HashSet<String>, HashSet<String>)>,
+    notify: Notify,
+}
+
+/// 跟着同步和审核页共用的：现在怎么样了，和“这几篇马上同步”。克隆出来的是同一个。
+#[derive(Debug, Clone, Default)]
+pub struct FollowLink(Arc<LinkInner>);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl FollowLink {
+    /// 现在的样子。
+    pub fn state(&self) -> FollowState {
+        locked(&self.0.state).clone()
+    }
+
+    /// 排着等同步的。
+    pub fn queued(&self) -> Queued {
+        let q = locked(&self.0.queued);
+        let mut docs: Vec<String> = q.0.iter().cloned().collect();
+        let mut resume: Vec<String> = q.1.iter().cloned().collect();
+        docs.sort();
+        resume.sort();
+        Queued { docs, resume }
+    }
+
+    /// 这篇文档马上同步一次（人在审核页处理完它的等人处理的条目以后）。没在跟着同步时什么都不会发生。
+    pub fn sync_now(&self, doc_id: &str) {
+        locked(&self.0.queued).0.insert(doc_id.to_owned());
+        self.0.notify.notify_one();
+    }
+
+    /// 这个停着的文件接着做（和 `tcms affine sync --resume <路径>` 一样）。
+    pub fn resume(&self, path: &str) {
+        locked(&self.0.queued).1.insert(path.to_owned());
+        self.0.notify.notify_one();
+    }
+
+    /// 在连 AFFiNE；`error` 是上一次没连上的原因。
+    pub fn connecting(&self, workspace: &str, error: Option<String>) {
+        let mut s = locked(&self.0.state);
+        if s.connection != Connection::Connecting {
+            s.since_ms = Some(now_ms());
+        }
+        s.connection = Connection::Connecting;
+        s.workspace = workspace.to_owned();
+        if let Some(e) = error {
+            s.error = Some(e);
+            s.error_ms = Some(now_ms());
+        }
+    }
+
+    fn connection(&self, c: Connection) {
+        let mut s = locked(&self.0.state);
+        if s.connection != c {
+            s.connection = c;
+            s.since_ms = Some(now_ms());
+        }
+    }
+
+    fn synced(&self, changed: bool) {
+        let mut s = locked(&self.0.state);
+        let now = now_ms();
+        s.last_sync_ms = Some(now);
+        if changed {
+            s.last_change_ms = Some(now);
+        }
+        s.error = None;
+        s.error_ms = None;
+    }
+
+    fn failed(&self, error: &Error) {
+        let mut s = locked(&self.0.state);
+        s.error = Some(error.to_string());
+        s.error_ms = Some(now_ms());
+    }
+
+    /// 拿走要马上同步的文档。
+    fn take_docs(&self) -> HashSet<String> {
+        std::mem::take(&mut locked(&self.0.queued).0)
+    }
+
+    /// 要接着做的文件（还没同步成的）。
+    fn resuming(&self) -> Vec<String> {
+        let mut v: Vec<String> = locked(&self.0.queued).1.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// 这几个文件接着做完了。
+    fn resumed(&self, paths: &[String]) {
+        let mut q = locked(&self.0.queued);
+        for p in paths {
+            q.1.remove(p);
+        }
+    }
+}
+
 /// 跟着同步要的东西。每次同步都重新打开上下文仓库，看得到别处做的提交。
 pub struct FollowEnv {
     pub repo: PathBuf,
@@ -183,6 +337,8 @@ pub struct FollowEnv {
     pub remote: Option<Remote>,
     /// 从远端拉的时候合并提交的作者。
     pub author: Author,
+    /// 和审核页共用的。
+    pub link: FollowLink,
 }
 
 /// 跟着同步时发生的事，交给调用的一方（记日志）。
@@ -208,14 +364,22 @@ pub async fn follow(
     git_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // 上次看 git 时的 HEAD；没变就不用再比。
     let mut seen: Option<Option<ObjectId>> = None;
+    env.link.connection(Connection::Connected);
     loop {
         if *stop.borrow() {
             return;
         }
         if let Some(job) = schedule.take(Instant::now()) {
-            match run_job(env, affine, &job).await {
-                Ok(report) => on(FollowEvent::Synced(&job, &report)),
+            // 人在审核页让接着做的文件，同步成了才去掉。
+            let resuming = env.link.resuming();
+            match run_job(env, affine, &job, &resuming).await {
+                Ok(report) => {
+                    env.link.resumed(&resuming);
+                    env.link.synced(changed(&report));
+                    on(FollowEvent::Synced(&job, &report));
+                }
                 Err(e) => {
+                    env.link.failed(&e);
                     on(FollowEvent::Failed(&e));
                     schedule.failed(job, Instant::now());
                 }
@@ -236,12 +400,21 @@ pub async fn follow(
                         schedule.affine_changed(&doc, Instant::now());
                     }
                     Event::Changed { .. } => {}
-                    Event::Disconnected(reason) => on(FollowEvent::Disconnected(&reason)),
+                    Event::Disconnected(reason) => {
+                        env.link.connection(Connection::Disconnected);
+                        on(FollowEvent::Disconnected(&reason));
+                    }
                     Event::Reconnected => {
+                        env.link.connection(Connection::Connected);
                         schedule.reconnected();
                         on(FollowEvent::Reconnected);
                     }
                 }
+                false
+            }
+            () = env.link.0.notify.notified() => {
+                let docs = env.link.take_docs();
+                schedule.git_changed(docs, !env.link.resuming().is_empty());
                 false
             }
             r = notice(&mut listener) => {
@@ -260,9 +433,19 @@ pub async fn follow(
             () = tokio::time::sleep_until(wake) => false,
         };
         if look_at_git && let Err(e) = check_git(env, &mut schedule, &mut seen).await {
+            env.link.failed(&e);
             on(FollowEvent::Failed(&e));
         }
     }
+}
+
+/// 这次同步往哪边写了东西。
+fn changed(report: &SyncReport) -> bool {
+    !report.commits.is_empty()
+        || report
+            .docs
+            .iter()
+            .any(|d| d.to_git.total() + d.to_affine.total() > 0 || d.state == "unlinked")
 }
 
 async fn notice(listener: &mut Option<PgListener>) -> Result<(), tcms_store::Error> {
@@ -295,6 +478,7 @@ async fn run_job(
     env: &FollowEnv,
     affine: &mut impl Affine,
     job: &Job,
+    resume: &[String],
 ) -> Result<SyncReport, Error> {
     let repo = ContextRepo::open(&env.repo)?;
     let cx = Context {
@@ -309,7 +493,7 @@ async fn run_job(
         Job::Full => None,
         Job::Docs(docs) => Some(docs),
     };
-    let report = sync_docs(&cx, affine, &[], only, false).await?;
+    let report = sync_docs(&cx, affine, resume, only, false).await?;
     // 新接上的文档也要收广播（取过的已经在收了）。
     let mut ids = vec![env.workspace.clone(), folders_doc_id(&env.workspace)];
     ids.extend(

@@ -73,14 +73,14 @@ pub(crate) fn error(status: StatusCode, code: &'static str, message: &str) -> Re
     ApiError::new(status, code, message).into_response()
 }
 
-type ApiResult = Result<Json<Value>, ApiError>;
+pub(crate) type ApiResult = Result<Json<Value>, ApiError>;
 
-fn store_error(e: tcms_store::Error) -> ApiError {
+pub(crate) fn store_error(e: tcms_store::Error) -> ApiError {
     eprintln!("审核页查数据库出错：{e}");
     ApiError::internal(format!("查数据库出错：{e}"))
 }
 
-fn not_found(what: &str, id: &str) -> ApiError {
+pub(crate) fn not_found(what: &str, id: &str) -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
         "not_found",
@@ -88,7 +88,7 @@ fn not_found(what: &str, id: &str) -> ApiError {
     )
 }
 
-fn body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+pub(crate) fn body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     payload
         .map(|Json(b)| b)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid", format!("请求不对：{e}")))
@@ -99,15 +99,29 @@ fn given(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.trim().is_empty())
 }
 
-fn author_for(state: &AppState, who: &Reviewer) -> Author {
+pub(crate) fn author_for(state: &AppState, who: &Reviewer) -> Author {
     Author {
         name: who.name.clone(),
         email: state.author_email.clone(),
     }
 }
 
-pub(crate) async fn me(Extension(who): Extension<Reviewer>) -> Json<Value> {
-    Json(json!({"name": who.name, "token_id": who.token_id}))
+/// 登录的是谁；`affine` 是审核页要不要显示“和 AFFiNE 同步”（这个服务在跟着同步，或者接上过范围）。
+pub(crate) async fn me(
+    State(state): State<AppState>,
+    Extension(who): Extension<Reviewer>,
+) -> ApiResult {
+    let affine = state.affine.is_some()
+        || !state
+            .live
+            .store()
+            .affine_scopes()
+            .await
+            .map_err(store_error)?
+            .is_empty();
+    Ok(Json(
+        json!({"name": who.name, "token_id": who.token_id, "affine": affine}),
+    ))
 }
 
 /// 和远端同步的情况：配的哪个远端、最近一次的结果、合并不了时怎么合并。`now_ms` 是服务器现在的时间，

@@ -12,8 +12,8 @@ use std::time::Duration;
 use affine_sync_client::{Client, Config, Credentials, Intent, SyncConnection};
 use tcms_affine::workspace::{self, DocMeta, NodeKind};
 use tcms_affine::{
-    Context, FollowEnv, FollowEvent, FollowOptions, Job, RandomIds, Section, Server, follow, link,
-    split, sync, to_blocks,
+    Context, FollowEnv, FollowEvent, FollowLink, FollowOptions, Job, RandomIds, Section, Server,
+    follow, link, split, sync, to_blocks,
 };
 use tcms_core::{ItemId, Scope};
 use tcms_git::{Author, ContextRepo, FileEdit};
@@ -273,6 +273,7 @@ async fn follow_a_real_affine() {
         actor: "测试".to_owned(),
         remote: None,
         author: Author::default(),
+        link: FollowLink::default(),
     };
     let ms = Duration::from_millis;
     let opts = FollowOptions {

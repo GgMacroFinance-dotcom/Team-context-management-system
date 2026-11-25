@@ -5,9 +5,12 @@
 //!   审核的人的令牌在 `/mcp` 也不认，agent 批准不了自己的提议。
 //! - 批准、改单条要写 git：放在一个专门的线程里排队做（[`Writer`]），和命令行的 `tcms accept` 排在同一个提交队列里。
 //! - `/hooks/push`：远端推送的 webhook（[`push_hook`]，配了 `TCMS_WEBHOOK_SECRET` 和远端时才有），签名对了马上同步一次。
+//! - `/api/affine...`：和 AFFiNE 同步的情况和处理（`docs/affine-sync.md` 7.5）；这个服务在跟着同步时，
+//!   和跟着同步的一方共用一个 [`tcms_affine::FollowLink`]（[`ReviewOptions::affine`]）。
 //!
 //! 第一版审核的人能看、能处理所有范围。
 
+mod affine;
 mod api;
 mod hooks;
 mod writer;
@@ -20,6 +23,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use http::{HeaderValue, StatusCode, header};
+use tcms_affine::FollowLink;
 use tcms_mcp::{Live, bearer};
 
 pub use hooks::{MIN_SECRET_LEN, push_hook};
@@ -40,6 +44,8 @@ pub struct ReviewOptions {
     pub allowed_hosts: Vec<String>,
     /// 审核页里批准、改单条时 git 提交者的邮箱（名字是审核的人的名字）。空的时候是 `tcms@localhost`。
     pub author_email: String,
+    /// 这个服务在跟着和 AFFiNE 同步时，和跟着同步的一方共用的（看现在怎么样了、处理完让它马上同步）。
+    pub affine: Option<FollowLink>,
 }
 
 #[derive(Clone)]
@@ -47,6 +53,7 @@ struct AppState {
     live: Arc<Live>,
     writer: Writer,
     author_email: String,
+    affine: Option<FollowLink>,
 }
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
@@ -67,6 +74,7 @@ pub fn router(live: Arc<Live>, writer: Writer, options: ReviewOptions) -> Router
         live,
         writer,
         author_email,
+        affine: options.affine.clone(),
     };
     let api = Router::new()
         .route("/api/me", get(api::me))
@@ -81,6 +89,9 @@ pub fn router(live: Arc<Live>, writer: Writer, options: ReviewOptions) -> Router
         .route("/api/items/{id}/promote", post(api::promote))
         .route("/api/promotions", get(api::promotions))
         .route("/api/remote", get(api::remote))
+        .route("/api/affine", get(affine::overview))
+        .route("/api/affine/conflicts/{id}/resolve", post(affine::resolve))
+        .route("/api/affine/docs/resume", post(affine::resume))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_reviewer,
