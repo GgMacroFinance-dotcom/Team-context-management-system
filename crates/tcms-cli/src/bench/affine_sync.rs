@@ -9,7 +9,10 @@
 //! - 跟着同步、空闲时比开始跟着同步之前多用的物理内存；
 //! - 提议显示成评论：给 100 条提议发评论，再看一遍（都发过了，只取回复）。
 //!
-//! 连真的 AFFiNE 时还要加上网络往返（同步协议取、推一篇各一次），这里量不到。
+//! 连真的 AFFiNE 时还要加上网络往返（同步协议取、推一篇各一次），假 AFFiNE 量不到。`--real` 换成真的 AFFiNE
+//! （`TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD`，和 `tcms serve` 一样）：每跑一次在里面新建一个
+//! 工作区（不删），“人在 AFFiNE 里改”用另一条同步连接推一段修改（和网页编辑器推的一样是 Yjs 更新），
+//! 收广播、取、推都走网络。只该对着测试用的 AFFiNE 跑。CI 里没有 AFFiNE，不跑。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,13 +21,13 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use affine_sync_client::{Comment, Error as ClientError};
+use affine_sync_client::{Client, Comment, Config, Error as ClientError, Intent, SyncConnection};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Value, json};
 use tcms_affine::workspace::set_workspace_name;
 use tcms_affine::{
     Affine, Context, Event, FollowEnv, FollowEvent, FollowLink, FollowOptions, Job, RandomIds,
-    Section, follow, link, split, sync, sync_comments, to_blocks,
+    Section, Server, follow, link, split, sync, sync_comments, to_blocks,
 };
 use tcms_core::{ItemId, Scope};
 use tcms_git::{Author, ContextRepo, FileEdit};
@@ -189,6 +192,75 @@ impl Affine for Shared {
     }
 }
 
+/// 模拟人在 AFFiNE 里把一条改成 `body`，改完发出去；返回发出去之前的时间。
+trait Human {
+    async fn edit(&mut self, doc_id: &str, title: &str, body: &str) -> Result<Instant>;
+}
+
+/// 在 `doc` 里把标题是 `title` 的那一条的正文换成 `body`。
+fn edit_item(doc: &Doc, title: &str, body: &str) -> Result<()> {
+    let page = tcms_affine::read(doc)?;
+    let heading = split(&page.blocks)
+        .into_iter()
+        .find_map(|s| match s {
+            Section::Item(i) if i.title == title => i.heading_id.clone(),
+            _ => None,
+        })
+        .with_context(|| format!("AFFiNE 里没有「{title}」"))?;
+    tcms_affine::update_item(doc, &heading, title, &to_blocks(body), &mut RandomIds)?;
+    Ok(())
+}
+
+/// 假 AFFiNE：直接改内存里的文档，再发一个广播。
+struct FakeHuman {
+    fake: Rc<RefCell<Fake>>,
+    events: mpsc::UnboundedSender<Event>,
+}
+
+impl Human for FakeHuman {
+    async fn edit(&mut self, doc_id: &str, title: &str, body: &str) -> Result<Instant> {
+        edit_item(self.fake.borrow().doc(doc_id)?, title, body)?;
+        let t = Instant::now();
+        self.events.send(Event::Changed {
+            workspace: WS.to_owned(),
+            doc: doc_id.to_owned(),
+        })?;
+        Ok(t)
+    }
+}
+
+/// 真 AFFiNE：另一条同步连接，取来改了再推上去。第一次改的时候才连：文档都建好以后再加入工作区，
+/// 不然新建文档以后之前的加入作废（`docs/affine-sync.md` 7.2）。
+struct RealHuman {
+    config: Config,
+    ws: String,
+    conn: Option<SyncConnection>,
+}
+
+impl Human for RealHuman {
+    async fn edit(&mut self, doc_id: &str, title: &str, body: &str) -> Result<Instant> {
+        if self.conn.is_none() {
+            let conn = Client::new(self.config.clone())?.sync().await?;
+            self.conn = Some(conn);
+        }
+        let conn = self.conn.as_ref().context("没连上")?;
+        let loaded = conn
+            .load_doc(&self.ws, doc_id, None)
+            .await?
+            .with_context(|| format!("AFFiNE 里没有文档 {doc_id}"))?;
+        let doc = Doc::new();
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(&loaded.update)?)?;
+        let sv = doc.transact().state_vector();
+        edit_item(&doc, title, body)?;
+        let delta = doc.transact().encode_state_as_update_v1(&sv);
+        let t = Instant::now();
+        conn.push_update(&self.ws, doc_id, &delta, Intent::Update)
+            .await?;
+        Ok(t)
+    }
+}
+
 fn path(file: usize) -> String {
     format!("role-bench/f{file:05}.md")
 }
@@ -212,7 +284,12 @@ fn file_text(file: usize, ids: &[ItemId], versions: &[usize]) -> String {
     s
 }
 
-pub async fn run(items: usize, edits: usize, check: bool) -> Result<ExitCode> {
+pub async fn run(items: usize, edits: usize, check: bool, real: bool) -> Result<ExitCode> {
+    // 门槛是按假 AFFiNE 定的，连真的时还有网络往返，不比。
+    ensure!(
+        !(real && check),
+        "--real 不能带 --check：门槛是按假 AFFiNE 定的"
+    );
     let url = crate::database_url()?;
     let files = items.div_ceil(ITEMS_PER_FILE).max(1);
     let dir = tempfile::tempdir()?;
@@ -234,25 +311,49 @@ pub async fn run(items: usize, edits: usize, check: bool) -> Result<ExitCode> {
     let store = Store::connect(&url, &temp_schema())
         .await
         .context("连接 PostgreSQL")?;
-    let result = measure(dir.path(), &repo, &store, &ids, &author, edits).await;
+    let b = Bench {
+        root: dir.path(),
+        repo: &repo,
+        store: &store,
+        ids: &ids,
+        author: &author,
+        edits,
+    };
+    let result = if real {
+        real_affine(&b).await
+    } else {
+        fake_affine(&b).await
+    };
     store.drop_schema().await?;
     let m = result?;
 
     let link_limit = LINK_LIMIT_1K.mul_f64(items as f64 / 1000.0);
     let full_limit = FULL_LIMIT_1K.mul_f64(items as f64 / 1000.0);
-    let line = |name: &str, p: &Percentiles, limit: Duration| {
+    let limit = |prefix: &str, limit: Duration| {
+        if real {
+            String::new()
+        } else {
+            format!("   门槛 {prefix}{:.0} 毫秒", ms(limit))
+        }
+    };
+    let line = |name: &str, p: &Percentiles, l: Duration| {
         println!(
-            "  {name}  中位数 {:>7.1} 毫秒  p95 {:>7.1} 毫秒   门槛 p95 {:.0} 毫秒",
+            "  {name}  中位数 {:>7.1} 毫秒  p95 {:>7.1} 毫秒{}",
             ms(p.p50),
             ms(p.p95),
-            ms(limit)
+            limit("p95 ", l)
         );
     };
-    println!("和 AFFiNE 同步的基准：{items} 条、{files} 篇文档（假 AFFiNE，在这个进程里）");
+    let backend = if real {
+        "真 AFFiNE，TCMS_AFFINE_URL 指的那个"
+    } else {
+        "假 AFFiNE，在这个进程里"
+    };
+    println!("和 AFFiNE 同步的基准：{items} 条、{files} 篇文档（{backend}）");
     println!(
-        "  第一次接上                     {:>7.1} 毫秒   门槛 {:.0} 毫秒",
+        "  第一次接上                     {:>7.1} 毫秒{}",
         ms(m.link),
-        ms(link_limit)
+        limit("", link_limit)
     );
     line("全部看一遍、两边都没变    ", &m.full, full_limit);
     line("AFFiNE 里改一条到提交完   ", &m.to_git, TO_GIT_LIMIT);
@@ -269,12 +370,20 @@ pub async fn run(items: usize, edits: usize, check: bool) -> Result<ExitCode> {
     };
     let grew = m.grew_mb();
     println!(
-        "  物理内存：跟着同步之前 {}，跟着同步、空闲 {:.0} 秒以后 {}，变化 {}（多用的门槛 {MEMORY_LIMIT_MB} MB）",
+        "  物理内存：跟着同步之前 {}，跟着同步、空闲 {:.0} 秒以后 {}，变化 {}{}",
         mb(m.rss_before),
         m.idle_wait.as_secs_f64(),
         mb(m.rss_idle),
         grew.map_or("量不到".to_owned(), |g| format!("{g:+.1} MB")),
+        if real {
+            String::new()
+        } else {
+            format!("（多用的门槛 {MEMORY_LIMIT_MB} MB）")
+        },
     );
+    if real {
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let mut failed = Vec::new();
     if m.link > link_limit {
@@ -335,15 +444,17 @@ enum Done {
     Failed(String),
 }
 
-async fn measure(
-    root: &std::path::Path,
-    repo: &ContextRepo,
-    store: &Store,
-    ids: &[Vec<ItemId>],
-    author: &Author,
+/// 一次基准的数据：上下文仓库、PostgreSQL、造的条目。
+struct Bench<'a> {
+    root: &'a std::path::Path,
+    repo: &'a ContextRepo,
+    store: &'a Store,
+    ids: &'a [Vec<ItemId>],
+    author: &'a Author,
     edits: usize,
-) -> Result<Measured> {
-    tcms_index::reindex(repo, store, false).await?;
+}
+
+async fn fake_affine(b: &Bench<'_>) -> Result<Measured> {
     let fake = Rc::new(RefCell::new(Fake::default()));
     {
         let ws = Doc::new();
@@ -355,10 +466,44 @@ async fn measure(
         fake: fake.clone(),
         events: rx,
     };
+    let mut human = FakeHuman { fake, events };
+    measure(b, &mut shared, WS, &mut human).await
+}
+
+async fn real_affine(b: &Bench<'_>) -> Result<Measured> {
+    let config = crate::affine::config()?;
+    let mut server = Server::connect(config.clone()).await.context("连 AFFiNE")?;
+    let ws = server
+        .create_workspace("TCMS 基准")
+        .await
+        .context("在 AFFiNE 里建工作区")?;
+    let mut human = RealHuman {
+        config,
+        ws: ws.clone(),
+        conn: None,
+    };
+    measure(b, &mut server, &ws, &mut human).await
+}
+
+async fn measure(
+    b: &Bench<'_>,
+    affine: &mut impl Affine,
+    ws: &str,
+    human: &mut impl Human,
+) -> Result<Measured> {
+    let Bench {
+        root,
+        repo,
+        store,
+        ids,
+        author,
+        ..
+    } = *b;
+    tcms_index::reindex(repo, store, false).await?;
     let cx = Context {
         repo,
         store,
-        workspace: WS,
+        workspace: ws,
         actor: "基准",
         remote: None,
         author,
@@ -367,7 +512,7 @@ async fn measure(
     // 第一次接上。
     let scope: Scope = SCOPE.parse().map_err(anyhow::Error::msg)?;
     let t = Instant::now();
-    let r = link(&cx, &mut shared, &scope, None).await?;
+    let r = link(&cx, affine, &scope, None).await?;
     let link_took = t.elapsed();
     let linked = r.docs.iter().filter(|d| d.state == "linked").count();
     ensure!(
@@ -380,7 +525,7 @@ async fn measure(
     let mut full = Vec::with_capacity(FULL_RUNS);
     for _ in 0..FULL_RUNS {
         let t = Instant::now();
-        let r = sync(&cx, &mut shared, &[]).await?;
+        let r = sync(&cx, affine, &[]).await?;
         full.push(t.elapsed());
         ensure!(
             r.commits.is_empty() && r.docs.iter().all(|d| d.state == "unchanged"),
@@ -400,7 +545,7 @@ async fn measure(
     let env = FollowEnv {
         repo: root.to_owned(),
         store: store.clone(),
-        workspace: WS.to_owned(),
+        workspace: ws.to_owned(),
         actor: "基准".to_owned(),
         remote: None,
         author: author.clone(),
@@ -415,7 +560,7 @@ async fn measure(
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let (done_tx, mut done) = mpsc::unbounded_channel();
-    let follower = follow(&env, &mut shared, opts, stopped, |ev| {
+    let follower = follow(&env, &mut *affine, opts, stopped, |ev| {
         let msg = match ev {
             FollowEvent::Synced(job, r) => Done::Synced {
                 at: Instant::now(),
@@ -429,7 +574,7 @@ async fn measure(
         let _ = done_tx.send(msg);
     });
     let script = async {
-        let r = drive(&fake, &events, &mut done, repo, store, ids, &doc_ids, edits).await;
+        let r = drive(human, &mut done, b, &doc_ids).await;
         let _ = stop.send(true);
         r
     };
@@ -479,7 +624,7 @@ async fn measure(
         };
     }
     let t = Instant::now();
-    let r = sync_comments(store, &mut shared, WS, Some("https://ctx.example.com")).await?;
+    let r = sync_comments(store, affine, ws, Some("https://ctx.example.com")).await?;
     let post_comments = t.elapsed();
     ensure!(
         r.posted.len() == PROPOSALS && r.errors.is_empty(),
@@ -488,7 +633,7 @@ async fn measure(
     let mut comments = Vec::with_capacity(COMMENT_RUNS);
     for _ in 0..COMMENT_RUNS {
         let t = Instant::now();
-        let r = sync_comments(store, &mut shared, WS, Some("https://ctx.example.com")).await?;
+        let r = sync_comments(store, affine, ws, Some("https://ctx.example.com")).await?;
         comments.push(t.elapsed());
         ensure!(r.is_empty(), "都发过了还有事做：{r:?}");
     }
@@ -508,17 +653,19 @@ async fn measure(
 
 /// 跟着同步时的测量：先等第一次全部看一遍；AFFiNE 里改 `edits` 次、git 里改 `edits` 次，一次做完再改下一次；
 /// 最后等物理内存稳下来。
-#[allow(clippy::too_many_arguments)]
 async fn drive(
-    fake: &Rc<RefCell<Fake>>,
-    events: &mpsc::UnboundedSender<Event>,
+    human: &mut impl Human,
     done: &mut mpsc::UnboundedReceiver<Done>,
-    repo: &ContextRepo,
-    store: &Store,
-    ids: &[Vec<ItemId>],
+    b: &Bench<'_>,
     doc_ids: &HashMap<String, String>,
-    edits: usize,
 ) -> Result<(Percentiles, Percentiles, Option<u64>, Duration)> {
+    let Bench {
+        repo,
+        store,
+        ids,
+        edits,
+        ..
+    } = *b;
     wait(done, |full, _, _| full).await?;
     let files = ids.len();
     let mut versions: Vec<Vec<usize>> = ids.iter().map(|f| vec![1; f.len()]).collect();
@@ -529,27 +676,11 @@ async fn drive(
         let file = (n * 7) % files;
         let item = n % ids[file].len();
         let doc_id = &doc_ids[&path(file)];
-        {
-            let fake = fake.borrow();
-            let doc = fake.doc(doc_id)?;
-            let page = tcms_affine::read(doc)?;
-            let title = format!("条目 {file}-{item}");
-            let heading = split(&page.blocks)
-                .into_iter()
-                .find_map(|s| match s {
-                    Section::Item(i) if i.title == title => i.heading_id.clone(),
-                    _ => None,
-                })
-                .with_context(|| format!("AFFiNE 里没有「{title}」"))?;
-            versions[file][item] += 1;
-            let body = item_body(file, item, versions[file][item]);
-            tcms_affine::update_item(doc, &heading, &title, &to_blocks(&body), &mut RandomIds)?;
-        }
-        let t = Instant::now();
-        events.send(Event::Changed {
-            workspace: WS.to_owned(),
-            doc: doc_id.clone(),
-        })?;
+        versions[file][item] += 1;
+        let body = item_body(file, item, versions[file][item]);
+        let t = human
+            .edit(doc_id, &format!("条目 {file}-{item}"), &body)
+            .await?;
         let at = wait(done, |full, commits, _| !full && commits > 0).await?;
         to_git.push(at - t);
         quiet(done).await?;

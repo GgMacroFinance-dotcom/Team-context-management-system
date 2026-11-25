@@ -58,7 +58,7 @@ pub enum What {
         check: bool,
     },
     /// 和 AFFiNE 同步：第一次接上、全部看一遍、跟着同步时两边改一条各要多久、跟着同步多用的内存、
-    /// 提议显示成评论。AFFiNE 换成这个进程里的假 AFFiNE。
+    /// 提议显示成评论。AFFiNE 换成这个进程里的假 AFFiNE，`--real` 时连真的。
     Affine {
         /// 造多少条（每个文件 20 条，一个文件一篇文档）。
         #[arg(long, default_value_t = 1000)]
@@ -69,6 +69,10 @@ pub enum What {
         /// 超过门槛时以非零状态退出（CI 用）。门槛按 1 千条定，第一次接上、全部看一遍按条数比例换算。
         #[arg(long)]
         check: bool,
+        /// 连真的 AFFiNE（TCMS_AFFINE_URL、TCMS_AFFINE_EMAIL、TCMS_AFFINE_PASSWORD）。每跑一次在里面新建一个
+        /// 工作区，不删，只该对着测试用的 AFFiNE 跑。
+        #[arg(long)]
+        real: bool,
     },
     /// AFFiNE 内核：读一篇 1 千个块的文档、合并 1 万条更新（含写进本地库）、导出整个工作区。不要数据库。
     AffineDoc {
@@ -97,7 +101,8 @@ pub async fn run(what: What) -> Result<ExitCode> {
             items,
             edits,
             check,
-        } => affine_sync::run(items, edits, check).await,
+            real,
+        } => affine_sync::run(items, edits, check, real).await,
         What::AffineDoc { check } => affine::run(check),
     }
 }
