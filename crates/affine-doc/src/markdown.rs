@@ -408,7 +408,7 @@ fn render_block(b: &Block, number: &mut usize, prev: Option<Family>) -> Option<S
     })
 }
 
-fn longest_run(s: &str, c: char) -> usize {
+pub(crate) fn longest_run(s: &str, c: char) -> usize {
     let mut best = 0;
     let mut cur = 0;
     for ch in s.chars() {
@@ -423,7 +423,7 @@ fn longest_run(s: &str, c: char) -> usize {
 }
 
 /// 每一行前面加上 `prefix`；空行加 `empty`。
-fn prefix_lines(s: &str, prefix: &str, empty: &str) -> String {
+pub(crate) fn prefix_lines(s: &str, prefix: &str, empty: &str) -> String {
     s.split('\n')
         .map(|l| {
             if l.is_empty() {
@@ -437,7 +437,7 @@ fn prefix_lines(s: &str, prefix: &str, empty: &str) -> String {
 }
 
 /// 除第一行外每一行前面加上 `pad`。
-fn prefix_rest(s: &str, pad: &str) -> String {
+pub(crate) fn prefix_rest(s: &str, pad: &str) -> String {
     let mut it = s.split('\n');
     let mut out = it.next().unwrap_or("").to_owned();
     for l in it {
@@ -451,7 +451,7 @@ fn prefix_rest(s: &str, pad: &str) -> String {
 }
 
 /// 段落的文字：行内格式，每一行开头会被当成块的写法时转义。
-fn render_lines(spans: &[Span]) -> String {
+pub(crate) fn render_lines(spans: &[Span]) -> String {
     let s = render_inline(spans);
     s.split('\n')
         .map(escape_line_start)
@@ -460,7 +460,7 @@ fn render_lines(spans: &[Span]) -> String {
 }
 
 /// 一行开头的 `#`、`>`、`-`、`+`、`=`、`1.` 这类会被当成标题、引用、列表；前面的空格会被当成代码块。
-fn escape_line_start(line: &str) -> String {
+pub(crate) fn escape_line_start(line: &str) -> String {
     let trimmed = line.trim_start_matches(' ');
     let lead = line.len() - trimmed.len();
     let mut out = "&#32;".repeat(lead);
@@ -486,7 +486,7 @@ fn escape_line_start(line: &str) -> String {
     out
 }
 
-fn escape_text(s: &str) -> String {
+pub(crate) fn escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if matches!(
@@ -500,7 +500,7 @@ fn escape_text(s: &str) -> String {
     out
 }
 
-fn render_inline(spans: &[Span]) -> String {
+pub(crate) fn render_inline(spans: &[Span]) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < spans.len() {

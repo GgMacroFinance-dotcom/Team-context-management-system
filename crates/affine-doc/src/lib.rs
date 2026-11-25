@@ -7,6 +7,7 @@
 //!
 //! - [`doc`]：一篇文档（块树）的读写；
 //! - [`markdown`]：Markdown 子集和块互相转换；
+//! - [`md_export`]：整篇文档（全部块）导出成 Markdown，只导出；
 //! - [`sections`]：按二级标题块切成一条一条；
 //! - [`bundle`]：AFFiNE 导出的工作区包（`.bs.zip`：快照加附件）的读写，整包导出、导入；
 //! - [`snapshot`]：BlockSuite 的文档快照（`.snapshot.json`）和 Yjs 文档互相转换；
@@ -17,6 +18,7 @@
 pub mod bundle;
 pub mod doc;
 pub mod markdown;
+pub mod md_export;
 pub mod model;
 pub mod order;
 pub mod schema;
@@ -33,6 +35,8 @@ pub use sections::{Item, Section, split};
 
 #[cfg(test)]
 mod bundle_tests;
+#[cfg(test)]
+mod md_export_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]
