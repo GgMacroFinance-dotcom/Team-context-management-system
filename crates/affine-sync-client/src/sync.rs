@@ -1,6 +1,7 @@
 //! AFFiNE 的同步协议：socket.io 上的 `space:*` 事件（0.27.5 起）。
 //!
 //! - 加入（`space:join-batch`）：一次最多 100 篇。加入了的文档才能取、才能推修改、才收得到别人改的广播。
+//!   工作区的权限变了以后（新建了文档也算）之前的加入作废，取、推被拒时重新加入这一篇再试一次。
 //! - 取（`space:load-doc`）：给状态向量就只回缺的那段更新。
 //! - 推（`space:push-doc-update`）：一段 Yjs 更新；新建的文档写 `intent: create`，不用先加入。
 //! - 哪些文档变过（`space:load-doc-timestamps`）。
@@ -210,7 +211,14 @@ impl SyncConnection {
         if let Some(sv) = state_vector {
             req["stateVector"] = json!(BASE64.encode(sv));
         }
-        let data = match self.call("space:load-doc", req).await {
+        let data = match self.call("space:load-doc", req.clone()).await {
+            Err(e) if join_expired(&e) => {
+                self.rejoin_doc(workspace_id, doc_id).await?;
+                self.call("space:load-doc", req).await
+            }
+            r => r,
+        };
+        let data = match data {
             Ok(d) => d,
             Err(Error::Remote { name, .. }) if name == "DOC_NOT_FOUND" => return Ok(None),
             Err(e) => return Err(e),
@@ -237,18 +245,20 @@ impl SyncConnection {
             Intent::Create => self.join(workspace_id, &[]).await?,
             Intent::Update => self.join(workspace_id, &[doc_id]).await?,
         }
-        let data = self
-            .call(
-                "space:push-doc-update",
-                json!({
-                    "spaceType": "workspace",
-                    "spaceId": workspace_id,
-                    "docId": doc_id,
-                    "update": BASE64.encode(update),
-                    "intent": match intent { Intent::Create => "create", Intent::Update => "update" },
-                }),
-            )
-            .await?;
+        let req = json!({
+            "spaceType": "workspace",
+            "spaceId": workspace_id,
+            "docId": doc_id,
+            "update": BASE64.encode(update),
+            "intent": match intent { Intent::Create => "create", Intent::Update => "update" },
+        });
+        let data = match self.call("space:push-doc-update", req.clone()).await {
+            Err(e) if intent == Intent::Update && join_expired(&e) => {
+                self.rejoin_doc(workspace_id, doc_id).await?;
+                self.call("space:push-doc-update", req).await
+            }
+            r => r,
+        }?;
         Ok(Pushed {
             timestamp: data
                 .get("timestamp")
@@ -289,11 +299,37 @@ impl SyncConnection {
         }
     }
 
+    /// 不管加没加入过，再加入一次这一篇（服务端会记下现在的权限）。
+    async fn rejoin_doc(&self, workspace_id: &str, doc_id: &str) -> Result<(), Error> {
+        let version = self.shared.client.client_version().await?;
+        {
+            let guard = self.shared.socket.read().await;
+            let socket = guard.as_ref().ok_or(Error::Disconnected)?;
+            join_batches(socket, &version, workspace_id, &[doc_id.to_owned()]).await?;
+        }
+        self.shared
+            .joined
+            .write()
+            .await
+            .entry(workspace_id.to_owned())
+            .or_default()
+            .insert(doc_id.to_owned());
+        Ok(())
+    }
+
     async fn call(&self, event: &str, data: Value) -> Result<Value, Error> {
         let guard = self.shared.socket.read().await;
         let socket = guard.as_ref().ok_or(Error::Disconnected)?;
         call(socket, event, data).await
     }
+}
+
+/// 加入时服务端记下的权限作废了：工作区的权限一变（新建了文档、改了成员……）服务端就换一代，
+/// 之前加入的文档再取、再推会被拒（取是 `NOT_IN_SPACE`，推是 `SYNC_PERMISSION_GENERATION_CHANGED`）。
+/// 网页版每次取之前都重新加入；这里记着加入过的，被拒了才重新加入这一篇，再试一次。
+fn join_expired(e: &Error) -> bool {
+    matches!(e, Error::Remote { name, .. }
+        if name == "NOT_IN_SPACE" || name == "SYNC_PERMISSION_GENERATION_CHANGED")
 }
 
 /// 发一个事件，把回执拆成 `data` 或者错。

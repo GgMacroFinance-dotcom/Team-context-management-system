@@ -72,10 +72,11 @@
 
 ### 5.1 记什么
 
-PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令牌读不到）：
+PostgreSQL 里加四张表（schema `tcms`，只有同步程序用，MCP 的令牌读不到；A3 做了，迁移 `0007_affine.sql`）：
 
-- `affine_docs`：文件路径 ↔ AFFiNE 文档 id，上次同步时这篇文档的 Yjs 状态向量、上次同步到的 git 提交、上次同步时整篇的内容哈希。
-- `affine_items`：条目 id ↔（文档 id，标题块 id），上次同步时这一条的标题和正文（“底稿”，三方比较用）。
+- `affine_scopes`：接上的范围 ↔ AFFiNE 工作区和里面那个文件夹，是整个范围接上还是只接了几个文件。
+- `affine_docs`：文件路径 ↔ AFFiNE 文档 id，上次同步完这篇文档的整个 Yjs 状态（下次只取差量，也用它看 AFFiNE 那边动没动）、上次同步时文件的 git blob、同步到的提交、停着的原因。
+- `affine_items`：条目 id ↔（文件，标题块 id），上次同步时这一条的标题和正文（“底稿”，三方比较用）。
 - `affine_conflicts`：两边都改了、没自动合的条目，等人处理。
 
 ### 5.2 AFFiNE → git
@@ -128,7 +129,8 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 | --- | --- | --- |
 | A1 | 新 crate `tcms-affine`：`yrs` 读写 AFFiNE 的文档结构；块树 ↔ 条目（按标题块切）；Markdown 子集 ↔ 块。**2026-11-24 已做**，见下面 7.1 | 单元测试：自己造的文档往返一遍不变；不认得的块原样留着 |
 | A2 | 连 AFFiNE：登录、刷新会话、socket.io 加入、取文档、推更新、收广播、断线重连；GraphQL 的评论（文件夹其实在工作区的一篇 Yjs 文档里，见 7.2）。**2026-11-24 已做**，见下面 7.2 | 对着 Docker 里的自托管 AFFiNE 测；用 AFFiNE 自己的编辑器打开对照 |
-| A3 | 同步循环：三张表、AFFiNE → git、git → AFFiNE、防回声、两边都改了的记下来；`tcms affine link`（把一个范围或文件接上）、`tcms affine status` | 集成测试：两边轮流改、同时改、断线、删一半 |
+| A3a | 同步一次：四张表、三方比较、AFFiNE → git、git → AFFiNE、防回声、两边都改了的记下来；`tcms affine init`、`link`（把一个范围或文件接上）、`sync`、`status`、`resolve`。**2026-11-24 做了**，见下面 7.3 | 集成测试：两边轮流改、同时改、删一半；对着 Docker 里的 AFFiNE 跑一遍 |
+| A3b | 一直跟着同步：`tcms serve` 里收广播、等人停手 10 秒、断线重连后补、每 5 分钟核对一次，git 的提交跟着变更序号写过去 | 集成测试：断线、两边轮流改 |
 | A4 | 审核页“和 AFFiNE 同步”：连接状态、冲突并排对照和处理、只读的条目；提议显示成评论 | 无头浏览器点一遍 |
 | A5 | 基准 `tcms bench affine`：1 千条的工作区第一次接上要多久、改一条从 AFFiNE 到提交要多久、常驻内存多多少 | 门槛定在 `architecture.md` 第 10 节 |
 
@@ -140,13 +142,13 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 - 切条目（`split`）：二级标题开始一条，到下一个一级或二级标题为止；第一个二级标题前面的和一级标题不算条目。每一条带着它那个二级标题块的 id（和上下文仓库里条目 id 的对应表 `affine_items` 在 A3 做）。
 - Markdown ↔ 块（`to_blocks`、`to_markdown`）：只转上面那几种；Markdown 里这一版不转的写法（表格、图片、HTML）留下原文，标成有损失。写出来的 Markdown 读回来是同样的块：像 Markdown 记号的字会转义，粗体前后的空格挪到记号外面，中文标点挨着粗体也能读回来（comrak 的 `cjk_friendly_emphasis`）。
 - 写（`create`、`set_title`、`update_item`、`insert_item`、`remove_item`）：新文档写成页面块、白板块、一个 note，块的 `sys:version` 和 0.27.5 一样，只写必要的属性（别的由 BlockSuite 加载时补默认值）。改一条时标题块的 id 不变，正文按块比较（Myers 差异，按每一块单独转成的 Markdown 比），只动变了的块：没变的块连同 Markdown 写不出的格式原样留着；占位注释对应的块不删、可以跟着挪位置；空段落留在原处。插文字一律带上格式属性（Yjs 里不带属性插进去会沿用前一个字的格式）。
-- 客户端 id：AFFiNE 用的 yjs 13.6 是 32 位，yrs 打开 `small-client` 特性一样是 32 位。块 id 是 10 个字符的随机串，和 AFFiNE 自己生成的样子一样。
+- 客户端 id：原来以为 AFFiNE 用的 yjs 13.6 是 32 位，yrs 打开了 `small-client` 特性。A3 时在 0.27.5-beta.3 的网页编辑器里打字，看到网页版的客户端 id 是 50 位的；开着 `small-client` 读这样的 id，块里的和删除集合里的截得不一样，网页里删掉的字读出来还在。所以去掉了 `small-client`，用 yrs 默认的 53 位（JavaScript 能精确表示的最大整数，yjs 13.6 也读得了）。块 id 是 10 个字符的随机串，和 AFFiNE 自己生成的样子一样。
 
 测试：`cargo test -p affine-doc` 里原来 A1 的 13 个单元测试，都是自己造的文档：Markdown 子集往返、转义、中文标点、不转换的块、写进去再读出来（也编码成 Yjs 更新再应用一遍）、按条目切、改一条只动变了的块、插入删除条目、占位注释、Markdown 写不出的格式不丢、空段落、嵌套列表和只在白板里的 note。
 
 另外在临时目录里手动对照过两样，没有放进 CI（要 Node 和 AFFiNE 的仓库）：
 
-- Rust 写的文档编码成更新，用 yjs 13.6.21 读：块的种类、`sys:version`、`sys:children`、带格式的文字、32 位客户端 id 都对；在 JS 里加一个块，Rust 读回来也对。
+- Rust 写的文档编码成更新，用 yjs 13.6.21 读：块的种类、`sys:version`、`sys:children`、带格式的文字、客户端 id 都对（当时是 32 位，后来改成 53 位，见上）；在 JS 里加一个块，Rust 读回来也对。
 - AFFiNE 仓库里 MIT 许可的读取器测试用的文档快照（`packages/common/reader/__tests__/__fixtures__/test-doc.snapshot.bin`）：读出 4 条，里面的数据库块变成占位注释。
 
 这个手动对照留了一个忽略的测试 `interop_with_affine_files`：设 `AFFINE_DOC_FIXTURE=<快照文件>` 读一个 AFFiNE 文档打印 Markdown，设 `AFFINE_DOC_DUMP=<文件>` 把样例文档写成 Yjs 更新，`cargo test -p affine-doc -- --ignored` 跑。当时还没对着真的 AFFiNE 服务跑过；A2 时对着 0.27.5-beta.3 的编辑器打开过 A1 写的文档，显示正常（7.2）。没加基准：A1 不在任何热路径上，基准在 A5。
@@ -160,14 +162,14 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 - **客户端版本**：不配就用服务端 `/info` 里的版本，和这个服务端自带的网页版报的一样，AFFiNE 升级时不用跟着改。
 - **socket.io**：自己写了一小层（Engine.IO 4、Socket.IO 5，只走 WebSocket，只用默认命名空间，只收发 JSON）：握手、回服务端心跳、按编号等回执、收服务端推的事件。隔 `pingInterval + pingTimeout` 没收到心跳就算断了。
 - **同步协议**（协议版本报 1，和 0.27.5 的网页版一样）：
-  - `join`：一次最多 100 篇。**加入了的文档才能取、才能推修改、才收得到别人改的广播**；新建文档（推的时候写 `intent: create`）也要先加入工作区。客户端会自己先加入。
+  - `join`：一次最多 100 篇。**加入了的文档才能取、才能推修改、才收得到别人改的广播**；新建文档（推的时候写 `intent: create`）也要先加入工作区。客户端会自己先加入。服务端加入时记下工作区权限的“第几代”，工作区里新建了文档、改了成员都会换一代，之前加入的文档再取、再推会被拒（`NOT_IN_SPACE`、`SYNC_PERMISSION_GENERATION_CHANGED`）；网页版每次取之前都重新加入，这里被拒了才重新加入这一篇、再试一次（A3 对着真 AFFiNE 跑时发现、补上的）。
   - `load_doc`：给状态向量就只回缺的那段；服务端没有这篇时是 `None`。
   - `push_update`：推一段 Yjs 更新，回服务端的时间戳。
   - `doc_timestamps`：工作区里每篇文档最后改的时间，可以只要某个时间以后的。
   - 服务端推来的：别人改了加入了的文档（带改的人的用户 id；服务端可能把几段合成一段，还是普通的 Yjs 更新）；工作区里每有人推修改，所有加入了这个工作区的连接还都会收到一个“有文档变了”（带时间戳，包括没加入的、刚新建的文档），A3 用它发现人在 AFFiNE 里新建的文档。
   - 断线以后后台自己重连（1 秒起，每次翻倍，最多 30 秒），要的话重新登录，重新加入断之前加入了的文档，再告诉用的一方“又连上了”：断开的这段时间里的修改收不到广播，A3 要拿状态向量各取一次差量。断开的时候调用直接返回“断了”，不排队。
 - **协议版本 2**：服务端还有只在版本 2 能用的 `space:load-workspace-state`、`space:doc-lifecycle`（服务端自己记文档列表和回收站）。0.27.5-beta.3 的网页版没用（报的是 1），用版本 1 调它们会被拒，所以这里也不用。**文档列表和回收站照旧在工作区根文档的 `meta.pages` 里**：在网页版里把一篇文档移进回收站，根文档里那一项多了 `trash: true` 和 `trashDate`（2026-11-24 用无头浏览器试过）。
-- **文件夹**：不在 GraphQL 里，在工作区里一篇 id 是 `db$<工作区 id>$folders` 的 Yjs 文档里（只写 `db$folders` 服务端会拒绝，A3a 对真 AFFiNE 核对的）：根上每个以节点 id 为键的 Y.Map 是一行，字段 `id`、`parentId`、`data`（文件夹名或文档 id）、`type`（`folder`、`doc`、`tag`、`collection`）、`index`（排序键：fractional-indexing 的键加 `0` 再加 32 个随机字符），删掉的行带 `$$DELETED`。用同步协议取、推；读写这几张表和根文档 `meta.pages` 的代码在 `affine-doc` 的 `workspace` 里（AFFiNE 内核方案的 K1，`docs/affine-kernel-rust.md`），这里不重复写。
+- **文件夹**：不在 GraphQL 里，在工作区里一篇 Yjs 文档里，服务端的文档 id 是 `db$<工作区 id>$folders`（A3 对着真 AFFiNE 跑时才发现：只写 `db$folders` 服务端不给读写）：根上每个以节点 id 为键的 Y.Map 是一行，字段 `id`、`parentId`、`data`（文件夹名或文档 id）、`type`（`folder`、`doc`、`tag`、`collection`）、`index`（排序键：fractional-indexing 的键加 `0` 再加 32 个随机字符），删掉的行带 `$$DELETED`。用同步协议取、推；读写这几张表和根文档 `meta.pages` 的代码在 `affine-doc` 的 `workspace` 里（AFFiNE 内核方案的 K1，`docs/affine-kernel-rust.md`），这里不重复写。
 - **GraphQL**：工作区（列出、新建）、最近改过的文档（`recentlyUpdatedDocs`）、评论（列出、发、标成已解决、删、按游标看变化）。评论的内容是一小篇 BlockSuite 文档的快照，`comment_content` 把几段纯文字做成这个样子，`comment_text` 反过来取文字。
 
 测试：
@@ -177,6 +179,42 @@ PostgreSQL 里加三张表（schema `tcms`，只有同步程序用，MCP 的令�
 - 另外手动用无头浏览器（Playwright）对照了 AFFiNE 网页版：Rust 写进去的文档在 AFFiNE 编辑器里打开，标题、二级标题、粗体、列表都对；在网页编辑器里打的字，Rust 这边收到广播、读成 Markdown 也对；连着的时候重启 AFFiNE 容器，4 秒后自己连回来。这些没写成自动测试（要浏览器和 AFFiNE）。
 
 没做的：网页版里评论要挂在文档里某段文字上才显示在那段旁边（文字上的 `comment-<id>` 属性），这是 A4 的事；没加基准，A2 不在热路径上，基准在 A5。
+
+### 7.3 A3a 做了什么（2026-11-24）
+
+A3 拆成两半：A3a 是“同步一次”，人（或定时任务）跑一次命令；A3b 是 `tcms serve` 里一直跟着同步。代码在 `crates/tcms-affine`（`plan` 三方比较，`bridge` 接上和同步，`server` 是对 `affine-sync-client` 的一层薄包装，测试里换成内存里的假 AFFiNE），命令在 `tcms affine`。
+
+- **命令**：`tcms affine init`（建一个专门的工作区，打印 id）、`link <范围> [--file <路径>]`、`sync [--resume <路径>]`、`status`、`resolve <编号> --keep git|affine`，都可以 `--json`。连 AFFiNE 的设置在环境变量：`TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD`、`TCMS_AFFINE_WORKSPACE`，可选 `TCMS_AFFINE_CA`。有停着的文档或等人处理的条目时 `sync`、`link`、`resolve` 的退出码是 2。
+- **接上**（`link`）：工作区根上建一个叫范围目录名的文件夹（`role-macro`，不是第 4 节说的 `teams.yaml` 显示名：现在还没有显示名可用），每个文件建一篇文档，标题是文件名，文件开头（第一个二级标题前面，去掉 YAML）照样放进去，每条一个二级标题块。写完先在本地读回来对一遍，对不上就不推。整个范围接上的（不带 `--file`），以后同步时范围里新加的文件建成文档，AFFiNE 里这个文件夹下新建的文档建成 `<范围目录>/<标题>.md`（重名加 ` 2`），每个二级标题一条，属性用默认值。
+- **同步一次**（`sync`）：每篇文档拿上次存的 Yjs 状态，只向服务端要差量；git 的 blob 和 AFFiNE 的状态（连删除的集合一起比，只删不加时状态向量不变）都没变就跳过。变了的照条目三方比较（git、AFFiNE、底稿），比的是块，Markdown 写法不同、内容一样的不算改：
+  - 只有一边改了、加了、删了：写到另一边。git 里删掉一条在 AFFiNE 里删掉那个二级标题和它下面的块；AFFiNE 里删掉一条在 git 里是删掉那一节（归档）。新的一条插在它前面那条后面。
+  - 两边都改了、改得一样：只更新底稿。改得不一样、一边删了另一边改了：不合，两边都不动，记进 `affine_conflicts`（`both`、`affine_deleted`、`git_deleted`）。
+  - git 里带表格、图片、HTML 的条目（转成块有损失）：写进 AFFiNE 照样写，AFFiNE 里改了不写回来，记成 `readonly`。写不过去的（写进文件以后读回来对不上、AFFiNE 里找不到那个标题块）记成 `invalid`。
+  - 等人处理的条目这次跳过；AFFiNE 里空标题的二级标题不算一条。
+  - 一篇文档要归档一半以上的条目、AFFiNE 里这篇移进了回收站、写进 AFFiNE 以后读回来对不上：这篇停下来，`status` 里写着为什么，人看过以后 `sync --resume <路径>` 接着做（回收站的那种接着做就是 git 里整篇归档、不再同步）。git 里删了文件、AFFiNE 里没改过：文档移进回收站，不再同步。
+- **写 git**：用 `tcms-write` 新加的 `begin_batch`（拿提交队列的锁、配了远端先拉、索引带到 HEAD，可以连着做几个提交，最后索引、记审计 `affine.sync` / `affine.link`、推到远端），一个文件一个提交。作者是 AFFiNE 里最后改这篇文档的人的名字（GraphQL 的最近改过的文档加上工作区成员，拿不到就写“AFFiNE”），邮箱固定 `affine@tcms.invalid`；提交信息是 `AFFiNE：<路径>（改 N 条、加 M 条、归档 K 条）`，下面是 `Item:` 几行、`Edited-by:`、`TCMS-Sync: affine`。
+- **防回声**：不用认更新是谁推的。每次写完两边都把底稿更新成写过去的样子、把 AFFiNE 那边的状态和 git 的 blob 存下来，下次比的时候这些都不算改。
+- **处理等人处理的**（`resolve`）：把底稿改成“不留的那边”，再同步一次，留下的那边就算改过、照常写到另一边；一边删了的，去掉或留下对应关系。审核页里的并排对照是 A4。
+
+测试：
+
+- `plan` 的 7 个单元测试：没改、一边改、两边改、删、只读、新加的位置、跳过等人处理的和空标题。
+- `tests/bridge.rs` 的 5 个对着内存里的假 AFFiNE 和真 PostgreSQL（`TCMS_TEST_DATABASE_URL`）：接上以后文档、文件夹、底稿都对；两边各改一条；新加和删除（一半以上停下来、`--resume`）；两边都改了等人处理、`resolve` 两种都试；只读的条目、整个范围接上以后两边新建的文件和文档。CI 里跑这些。
+- `tests/affine.rs` 对着真的 AFFiNE（和 A2 一样要 `AFFINE_TEST_*` 再加 `TCMS_TEST_DATABASE_URL`，没设就跳过）：建工作区、接上 `role:macro`，用另一条连接看文档列表、文件夹、两条都在；另一条连接改第一条，同步以后进了 git，作者对；git 里改第二条，同步以后另一条连接读到；再同步一次两边都没变，服务端的文档和本系统存的一样。2026-11-24 在开发机上对着 Docker 里的 0.27.5-beta.3 跑过。
+
+另外手动从头试了一遍命令行加网页编辑器（Docker 里的 0.27.5-beta.3，无头浏览器）：`tcms affine init`、`link role:macro`；在网页编辑器里给一条加字再删掉几个、在最后打 `## ` 加一条新的；`tcms affine sync` 以后 git 里改了一条、加了一条（类型用默认的 `reference`），作者是 AFFiNE 账号的名字；在 git 里改两条（其中一条是网页里新加的）再 `sync`，重开网页看到的是改过的；再 `sync` 两边都没变。
+
+这一步对着真 AFFiNE 跑时修了三处：
+
+- 文件夹表在服务端的 id 是 `db$<工作区 id>$folders`（`affine-doc` 的 `workspace::table_doc_id` 拼的是 `db$folders`，这里先在 `tcms-affine` 里自己拼，`folders_doc_id`）。
+- `affine-sync-client` 被拒以后重新加入（7.2）。
+- yrs 去掉 `small-client`（7.1）：网页版的客户端 id 超过 32 位，开着它时网页里删掉的字读出来还在（打 `## ` 变成标题时删掉的 `## ` 跟着进了 git）。加了一个测试，用 yjs 13.6.21 拿 50 位客户端 id 写的一小段更新。
+
+还没做的：
+
+- 文件开头（第一个二级标题前面的内容）只在接上时放进 AFFiNE，之后两边改了都不同步；没有二级标题的文件不接；AFFiNE 里改文档标题不改文件名；文件夹改名、挪动不管。
+- 一次同步整个过程都拿着提交队列的锁，连 AFFiNE 的时间也在里面，这期间批准、改单条要等。A3b 一直跟着同步时要改成只在写 git 的时候拿锁。
+- 没加基准，在 A5。
 
 ## 8. 已定的事（2026-11-24，维护者在卡片上选了“都按推荐定”）
 
