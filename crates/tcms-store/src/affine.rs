@@ -16,6 +16,48 @@ pub struct AffineAudit {
     pub detail: serde_json::Value,
 }
 
+/// 一条提议在 AFFiNE 里显示成的评论（迁移 0008）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AffineComment {
+    pub proposal_id: String,
+    pub workspace_id: String,
+    pub doc_id: String,
+    /// 发评论时文档对应的文件。
+    pub path: String,
+    pub comment_id: String,
+    /// 回复了结果、标成了已解决（或者评论在 AFFiNE 里被删了）。
+    pub closed: bool,
+    /// 人在 AFFiNE 里的回复：`[{id, user, text, at}]`。
+    pub replies: serde_json::Value,
+    /// 存的时候不用填。
+    pub created_at: String,
+}
+
+fn comment_of(r: &sqlx::postgres::PgRow) -> Result<AffineComment> {
+    Ok(AffineComment {
+        proposal_id: r.try_get("proposal_id")?,
+        workspace_id: r.try_get("workspace_id")?,
+        doc_id: r.try_get("doc_id")?,
+        path: r.try_get("path")?,
+        comment_id: r.try_get("comment_id")?,
+        closed: r.try_get("closed")?,
+        replies: r.try_get("replies")?,
+        created_at: r.try_get("created_at")?,
+    })
+}
+
+/// 取评论的 SELECT，后面接条件。写成宏是为了拼出来的仍是字面量。
+macro_rules! select_comment {
+    ($tail:literal) => {
+        concat!(
+            "SELECT proposal_id, workspace_id, doc_id, path, comment_id, closed, replies, ",
+            "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at ",
+            "FROM affine_comments ",
+            $tail
+        )
+    };
+}
+
 /// 接上的范围。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AffineScope {
@@ -369,6 +411,67 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         crate::tokens::audit(&mut tx, actor, action, target, detail).await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// 提议显示成的评论，早的在前。`open_only` 只要还没关的。
+    pub async fn affine_comments(&self, open_only: bool) -> Result<Vec<AffineComment>> {
+        let sql = if open_only {
+            select_comment!("WHERE NOT closed ORDER BY created_at, proposal_id")
+        } else {
+            select_comment!("ORDER BY created_at, proposal_id")
+        };
+        let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
+        rows.iter().map(comment_of).collect()
+    }
+
+    /// 一条提议显示成的评论；没发过是 `None`。
+    pub async fn affine_comment(&self, proposal_id: &str) -> Result<Option<AffineComment>> {
+        let row = sqlx::query(select_comment!("WHERE proposal_id = $1"))
+            .bind(proposal_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(comment_of).transpose()
+    }
+
+    /// 记下发了的评论。
+    pub async fn add_affine_comment(&self, c: &AffineComment) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO affine_comments (proposal_id, workspace_id, doc_id, path, comment_id, closed, replies) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&c.proposal_id)
+        .bind(&c.workspace_id)
+        .bind(&c.doc_id)
+        .bind(&c.path)
+        .bind(&c.comment_id)
+        .bind(c.closed)
+        .bind(&c.replies)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 换上 AFFiNE 里现在的回复。
+    pub async fn set_affine_comment_replies(
+        &self,
+        proposal_id: &str,
+        replies: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query("UPDATE affine_comments SET replies = $2 WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .bind(replies)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 关上：回复了结果、标成了已解决，或者评论在 AFFiNE 里没了。
+    pub async fn close_affine_comment(&self, proposal_id: &str) -> Result<()> {
+        sqlx::query("UPDATE affine_comments SET closed = true WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

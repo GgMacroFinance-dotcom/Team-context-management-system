@@ -1,4 +1,4 @@
-//! 用得到的几个 GraphQL 接口：工作区、最近改过的文档、评论。
+//! 用得到的几个 GraphQL 接口：工作区、最近改过的文档、评论和回复。
 //!
 //! 查询的写法照 AFFiNE 网页版用的那几个（`packages/common/graphql` 里的 `.gql`，MIT），只要用得到的字段。
 
@@ -40,6 +40,8 @@ pub struct Comment {
     pub content: Value,
     pub resolved: bool,
     pub user_id: String,
+    /// 发的人在 AFFiNE 里的名字。
+    pub user_name: String,
     pub created_at: String,
     pub updated_at: String,
     pub replies: Vec<Comment>,
@@ -63,7 +65,8 @@ pub enum DocMode {
     Edgeless,
 }
 
-const COMMENT_FIELDS: &str = "id content resolved createdAt updatedAt user { id } replies { id content createdAt updatedAt user { id } }";
+const COMMENT_FIELDS: &str = "id content resolved createdAt updatedAt user { id name } replies { id content createdAt updatedAt user { id name } }";
+const REPLY_FIELDS: &str = "id content createdAt updatedAt user { id name }";
 
 impl Client {
     pub async fn workspaces(&self) -> Result<Vec<WorkspaceInfo>, Error> {
@@ -180,6 +183,32 @@ impl Client {
         comment(get(&data, &["createComment"])?)
     }
 
+    /// 回复一条评论，返回这条回复（`replies` 是空的、`resolved` 是 `false`）。`doc_title`、`mode` 和发评论时一样，
+    /// 服务端拿来写通知。
+    pub async fn create_reply(
+        &self,
+        comment_id: &str,
+        doc_title: &str,
+        mode: DocMode,
+        content: Value,
+    ) -> Result<Comment, Error> {
+        let query = format!(
+            "mutation($input: ReplyCreateInput!) {{ createReply(input: $input) {{ {REPLY_FIELDS} }} }}"
+        );
+        let data = self
+            .graphql(
+                &query,
+                json!({ "input": {
+                    "commentId": comment_id,
+                    "docTitle": doc_title,
+                    "docMode": match mode { DocMode::Page => "page", DocMode::Edgeless => "edgeless" },
+                    "content": content,
+                }}),
+            )
+            .await?;
+        comment(get(&data, &["createReply"])?)
+    }
+
     /// 把评论标成已解决（或者取消）。
     pub async fn resolve_comment(&self, comment_id: &str, resolved: bool) -> Result<(), Error> {
         self.graphql(
@@ -233,11 +262,31 @@ impl Client {
 /// 一条纯文字评论的内容：每段一个段落块。AFFiNE 的评论内容是一小篇 BlockSuite 文档的快照
 /// （和网页版发评论时一样：页面块 → note → 段落）。`preview` 是评论针对的那段文字，可以不写。
 pub fn comment_content(paragraphs: &[&str], preview: Option<&str>) -> Result<Value, Error> {
-    let text = |s: &str| {
-        json!({
-            "$blocksuite:internal:text$": true,
-            "delta": if s.is_empty() { json!([]) } else { json!([{ "insert": s }]) },
-        })
+    let paragraphs: Vec<Vec<Span<'_>>> = paragraphs.iter().map(|p| vec![Span::Text(p)]).collect();
+    comment_spans(&paragraphs, preview)
+}
+
+/// 评论里一段中的一截：纯文字，或者链接。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Span<'a> {
+    Text(&'a str),
+    Link { text: &'a str, url: &'a str },
+}
+
+/// 和 [`comment_content`] 一样，每段可以有几截，其中可以有链接（文字上的 `link` 属性，和网页版一样）。
+pub fn comment_spans(paragraphs: &[Vec<Span<'_>>], preview: Option<&str>) -> Result<Value, Error> {
+    let text = |spans: &[Span<'_>]| {
+        let delta: Vec<Value> = spans
+            .iter()
+            .filter_map(|s| match s {
+                Span::Text("") | Span::Link { text: "", .. } => None,
+                Span::Text(t) => Some(json!({ "insert": t })),
+                Span::Link { text, url } => {
+                    Some(json!({ "insert": text, "attributes": { "link": url } }))
+                }
+            })
+            .collect();
+        json!({ "$blocksuite:internal:text$": true, "delta": delta })
     };
     let block =
         |flavour: &str, version: u32, props: Value, children: Vec<Value>| -> Result<Value, Error> {
@@ -271,7 +320,7 @@ pub fn comment_content(paragraphs: &[&str], preview: Option<&str>) -> Result<Val
         }),
         paras,
     )?;
-    let root = block("affine:page", 2, json!({ "title": text("") }), vec![note])?;
+    let root = block("affine:page", 2, json!({ "title": text(&[]) }), vec![note])?;
     let mut content = json!({
         "snapshot": {
             "type": "page",
@@ -347,6 +396,12 @@ fn comment(n: &Value) -> Result<Comment, Error> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
+        user_name: n
+            .get("user")
+            .and_then(|u| u.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         created_at: string(n, "createdAt")?,
         updated_at: string(n, "updatedAt")?,
         replies: n
@@ -417,5 +472,30 @@ mod tests {
         assert_eq!(para["flavour"], "affine:paragraph");
         assert_eq!(para["props"]["type"], "text");
         assert_eq!(para["id"].as_str().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn links_in_comments() {
+        let c = comment_spans(
+            &[vec![
+                Span::Text("在审核页处理："),
+                Span::Link {
+                    text: "打开",
+                    url: "https://ctx.example.com/review#/proposals/p1",
+                },
+                Span::Text(""),
+            ]],
+            None,
+        )
+        .unwrap();
+        assert_eq!(comment_text(&c), "在审核页处理：打开");
+        let delta =
+            &c["snapshot"]["blocks"]["children"][0]["children"][0]["props"]["text"]["delta"];
+        assert_eq!(delta.as_array().unwrap().len(), 2);
+        assert_eq!(
+            delta[1]["attributes"]["link"],
+            "https://ctx.example.com/review#/proposals/p1"
+        );
+        assert!(c.get("preview").is_none());
     }
 }

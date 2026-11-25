@@ -240,6 +240,7 @@ impl Store {
             "title": p.title, "token": who.token_id, "redacted": p.redacted,
         });
         audit(&mut tx, &agent_actor(who), "proposal.create", &id, detail).await?;
+        notify_proposals(&mut tx).await?;
         let created = sqlx::query(select_proposal!("WHERE id = $1"))
             .bind(&id)
             .fetch_one(&mut *tx)
@@ -328,6 +329,15 @@ impl CommitLock {
     }
 }
 
+/// 告诉和 AFFiNE 同步的一方提议变了（随事务提交才发出去）。内容是 schema 的名字，同一个库里别的 schema 的不用管。
+async fn notify_proposals(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_notify($1, current_schema())")
+        .bind(crate::PROPOSALS_CHANNEL)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// 审计里 agent 的写法。
 fn agent_actor(who: &Identity) -> String {
     format!("{}（{}）", who.name, who.token_id)
@@ -383,6 +393,7 @@ impl Decision {
             detail,
         )
         .await?;
+        notify_proposals(&mut self.tx).await?;
         let r = sqlx::query(select_proposal!("WHERE id = $1"))
             .bind(&self.proposal.id)
             .fetch_one(&mut *self.tx)
@@ -411,6 +422,7 @@ impl Decision {
             detail,
         )
         .await?;
+        notify_proposals(&mut self.tx).await?;
         self.tx.commit().await?;
         Ok(())
     }

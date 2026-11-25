@@ -173,7 +173,7 @@ Edited-by: 王审核（tok_01JDX4...）
 - **版本**：PostgreSQL 15 及以上，打包服务器上用 17。第一版不要求任何扩展。
 - **和 I.P. 怎么分**（2026-11-22 和 I.P. 改 PostgreSQL 的线程对过）：同一个库 `ip`；本系统用 schema `tcms`、登录角色 `tcms_app`，I.P. 用 schema `ip`、角色 `ip_app`；各自只拥有自己的 schema，对另一边没有任何权限，跨系统只走 MCP，不做跨 schema 的 SQL。打包服务器的 compose 只起一个 `postgres:17` 容器，初始化脚本建两个角色和两个 schema，密码走环境变量。`tcms_app` 没有在库里建 schema 的权限，所以连接时先查 schema 在不在，已经有了就不再 `CREATE SCHEMA`（`IF NOT EXISTS` 也会先查这个权限，2026-11-23 在 Docker 里试部署时发现）。
 - **迁移记录和锁**：`tcms_app` 的 `search_path` 是 `tcms`，sqlx 的迁移记录表落在 `tcms._sqlx_migrations`。sqlx 迁移时的 advisory lock 键按库名算，I.P. 用自己的固定键，避开它。
-- **通知频道**：LISTEN/NOTIFY 的频道是库级的，本系统的频道一律以 `tcms_` 开头（目前只有 `tcms_changes`），I.P. 用 `ip_` 开头。
+- **通知频道**：LISTEN/NOTIFY 的频道是库级的，本系统的频道一律以 `tcms_` 开头（`tcms_changes`；`tcms_proposals`，提议建了、批准了、拒绝了，内容是 schema 名，2026-11-25 加的，和 AFFiNE 跟着同步的一方用它发评论），I.P. 用 `ip_` 开头。
 - **表**（`spec.md` 3.4 的四张表改成下面这样，条目本身的历史交给 git）：
 
   | 表 | 内容 |
@@ -185,6 +185,7 @@ Edited-by: 王审核（tok_01JDX4...）
   | `tokens` | 令牌 id（`tok_` 加 ULID）、种类（`agent` 或 `reviewer`）、名字、令牌的 SHA-256、岗位（只有 `agent` 有，约束保证）、团队、能声明的项目（`*` 是任何项目）、发的时间、过期时间、吊销时间。两种令牌互不通用：核对 MCP 的令牌只认 `agent`，审核页只认 `reviewer` |
   | `item_uses` | 条目被 agent 用了几次：条目 id、日期（UTC）、岗位、次数，一天一个岗位一行（2026-11-24，迁移 `0006_item_uses.sql`）。找用得多的晋升候选用（第 3 节），只留 90 天 |
   | `affine_scopes`、`affine_docs`、`affine_items`、`affine_conflicts` | 和 AFFiNE 同步（2026-11-24，迁移 `0007_affine.sql`，`affine-sync.md` 5.1）：接上的范围对应的工作区和文件夹，文件对应的文档和上次同步完的 Yjs 状态，条目对应的标题块和底稿，两边都改了等人处理的。只有 `tcms affine` 用 |
+  | `affine_comments` | 提议在 AFFiNE 里显示成的评论（2026-11-25，迁移 `0008_affine_comments.sql`，`affine-sync.md` 7.6）：提议 id、工作区、文档、文件、评论 id、关了没有、人在 AFFiNE 里的回复。提议删掉时跟着删 |
   | `audit` | 谁在什么时候做了什么（提议、批准、拒绝、令牌增删）。第 3 步记发令牌和吊销，第 4 步加提议、接受、拒绝，第 5 步加人在审核页改单条（`item.edit`），和 AFFiNE 同步时加 `affine.link`、`affine.sync`，审核页（和 `tcms affine resolve`）处理等人处理的加 `affine.resolve`、接着做加 `affine.resume` |
 
 - **行级安全**（2026-11-24 做了，迁移 `0005_row_security.sql`）：agent 经 MCP 查数据库的读（`context_read` 读现在这一版和旧版本，`context_changes` 查变更）都在一个只读、可重复读的事务里，开头用 `set_config(..., true)` 写上令牌能看的范围：`tcms.scopes` 是数组写法（比如 `{org,team:research,role:macro,project:q4}`），`tcms.all_projects` 是 `on` 或 `off`（令牌的项目是 `*` 时为 `on`）。只在这个事务里有效，连接放回池子以后不带到下一次。`items`、`item_versions`（按快照里那个版本当时的范围）、`changes` 上各有一条策略 `reach`，调函数 `visible_scope(scope)`：写了 `tcms.scopes` 就只放行这些范围（空数组什么都看不到），没写就不拦。没写的是服务自己的读写：建索引、取条目建检索索引、审核页、命令行，这些要看全部。
@@ -232,7 +233,7 @@ Edited-by: 王审核（tok_01JDX4...）
 **在智能岗位服务器上**
 
 - 一个 PostgreSQL（和 I.P. 共用，见第 5 节），`tcms` 作为 systemd 服务，上下文仓库在 `/var/lib/tcms/context`，可以配一个客户自己的远端（GitHub、Gitea 等）。
-- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`，远端的 `TCMS_REMOTE`、`TCMS_REMOTE_BRANCH`、`TCMS_GIT_TOKEN`、`TCMS_GIT_USERNAME`、`TCMS_SYNC_SECS`、`TCMS_WEBHOOK_SECRET`，和 AFFiNE 同步的 `TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD`、`TCMS_AFFINE_WORKSPACE`、`TCMS_AFFINE_CA`）。
+- 服务配置 `tcms.yaml`：`database_url`、上下文仓库路径、远端、监听地址、预算默认值。密钥只从环境变量读。现在还没有这个文件，用命令行参数和环境变量（`TCMS_DATABASE_URL`、`TCMS_SCHEMA`、`TCMS_REPO`、`TCMS_LISTEN`、`TCMS_ALLOWED_HOSTS`、`TCMS_TOKEN`、`TCMS_GIT_EMAIL`，远端的 `TCMS_REMOTE`、`TCMS_REMOTE_BRANCH`、`TCMS_GIT_TOKEN`、`TCMS_GIT_USERNAME`、`TCMS_SYNC_SECS`、`TCMS_WEBHOOK_SECRET`，和 AFFiNE 同步的 `TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD`、`TCMS_AFFINE_WORKSPACE`、`TCMS_AFFINE_CA`，审核页对外的地址 `TCMS_PUBLIC_URL`（写进 AFFiNE 评论里的链接））。
 
 **客户自己改造部署**
 
@@ -243,7 +244,7 @@ Edited-by: 王审核（tok_01JDX4...）
 
 ## 8. 以后和 AFFiNE 同步
 
-方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写（`crates/affine-doc`，第一步 A1 2026-11-24 已做，同一天从 `crates/tcms-affine` 搬过去）；连 AFFiNE 的登录、同步协议、GraphQL 在 `crates/affine-sync-client`（第二步 A2 2026-11-24 已做，不用 TCMS 自己的类型；同一天从 `tcms-affine-client` 改名搬进 AFFiNE 内核）；接上和同步一次在 `crates/tcms-affine`（第三步的前一半 A3a 2026-11-24 已做：三方比较、`tcms affine` 命令，对应关系和底稿存在 PostgreSQL 的 `affine_scopes`、`affine_docs`、`affine_items`、`affine_conflicts` 四张表里，迁移 `0007_affine.sql`；后一半 A3b 2026-11-25 做了：`tcms serve` 里一直跟着同步，两边都没变的不拿提交队列的锁，见 `affine-sync.md` 7.4）；审核页里的“和 AFFiNE 同步”（A4a，2026-11-25，`affine-sync.md` 7.5）；人在 AFFiNE 里改，由同步程序变成提交；agent 的提议在 AFFiNE 里显示成评论。CRDT 只在这座桥上用，真相还是 git。
+方案见 [`affine-sync.md`](affine-sync.md)（2026-11-24，维护者按推荐定了第 8 节）：一个 Markdown 文件对应 AFFiNE 里的一篇文档，一条对应一个二级标题块，用 yrs 读写（`crates/affine-doc`，第一步 A1 2026-11-24 已做，同一天从 `crates/tcms-affine` 搬过去）；连 AFFiNE 的登录、同步协议、GraphQL 在 `crates/affine-sync-client`（第二步 A2 2026-11-24 已做，不用 TCMS 自己的类型；同一天从 `tcms-affine-client` 改名搬进 AFFiNE 内核）；接上和同步一次在 `crates/tcms-affine`（第三步的前一半 A3a 2026-11-24 已做：三方比较、`tcms affine` 命令，对应关系和底稿存在 PostgreSQL 的 `affine_scopes`、`affine_docs`、`affine_items`、`affine_conflicts` 四张表里，迁移 `0007_affine.sql`；后一半 A3b 2026-11-25 做了：`tcms serve` 里一直跟着同步，两边都没变的不拿提交队列的锁，见 `affine-sync.md` 7.4）；审核页里的“和 AFFiNE 同步”（A4a，2026-11-25，`affine-sync.md` 7.5）；agent 的提议在 AFFiNE 里显示成评论（A4b，2026-11-25，`affine-sync.md` 7.6，`crates/tcms-affine/src/comments.rs`）；人在 AFFiNE 里改，由同步程序变成提交。CRDT 只在这座桥上用，真相还是 git。
 
 ## 9. 依赖
 

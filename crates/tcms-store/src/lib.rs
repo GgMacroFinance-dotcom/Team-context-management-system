@@ -12,6 +12,8 @@ use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 
 /// 有变更时发的通知频道。频道是库级的，所以带 `tcms_` 前缀（和 I.P. 共用一个库）。
 pub const NOTIFY_CHANNEL: &str = "tcms_changes";
+/// 提议建了、批准了、拒绝了时发的通知（内容是 schema 的名字）：和 AFFiNE 同步的一方收到以后发评论、回复结果。
+pub const PROPOSALS_CHANNEL: &str = "tcms_proposals";
 
 /// 一次写入的行数上限。
 const CHUNK: usize = 2000;
@@ -34,7 +36,9 @@ mod uses;
 
 pub use sqlx::postgres::PgListener;
 
-pub use affine::{AffineAudit, AffineBase, AffineConflict, AffineDoc, AffineSave, AffineScope};
+pub use affine::{
+    AffineAudit, AffineBase, AffineComment, AffineConflict, AffineDoc, AffineSave, AffineScope,
+};
 pub use proposals::{Action, CommitLock, Decision, NewProposal, ProposalRow, Proposed};
 pub use tokens::{
     ALL_PROJECTS, Identity, ItemRead, NewToken, Reviewer, TOKEN_PREFIX, TokenRow, VisibleChange,

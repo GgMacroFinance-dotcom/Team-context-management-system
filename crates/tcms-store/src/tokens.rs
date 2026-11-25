@@ -414,8 +414,13 @@ impl Store {
 
     /// 订阅变更通知（`NOTIFY tcms_changes`）。
     pub async fn listen(&self) -> Result<PgListener> {
+        self.listen_to(&[NOTIFY_CHANNEL]).await
+    }
+
+    /// 订阅几个通知（[`NOTIFY_CHANNEL`]、[`crate::PROPOSALS_CHANNEL`]）。
+    pub async fn listen_to(&self, channels: &[&str]) -> Result<PgListener> {
         let mut l = PgListener::connect_with(&self.pool).await?;
-        l.listen(NOTIFY_CHANNEL).await?;
+        l.listen_all(channels.iter().copied()).await?;
         Ok(l)
     }
 }

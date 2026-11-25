@@ -8,6 +8,9 @@
 //! - 刚开始、断线重连以后、每 [`FollowOptions::full_every`]：全部看一遍，补上漏掉的广播；
 //! - 出错了：[`FollowOptions::retry`] 以后再来，没同步成的留着。
 //!
+//! 提议显示成评论（[`crate::comments`]）：提议建了、批准了、拒绝了（`NOTIFY tcms_proposals`）停 [`COMMENTS_DELAY`]
+//! 看一遍；每次全部看一遍以后也看一遍（顺便取回 AFFiNE 里的回复）。
+//!
 //! 每次同步都看一遍新文件、新文档和回收站；接上的文档只看要看的那几篇，两边都没变的不拿提交队列的锁
 //! （[`crate::bridge`] 的“同步一次”）。
 //!
@@ -21,12 +24,16 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tcms_git::{Author, ContextRepo, ObjectId, Remote};
-use tcms_store::{PgListener, Store};
+use tcms_store::{NOTIFY_CHANNEL, PROPOSALS_CHANNEL, PgListener, Store};
 use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
 use crate::bridge::{Context, Error, SyncReport, folders_doc_id, git_changes, sync_docs};
+use crate::comments::{CommentReport, sync_comments};
 use crate::server::{Affine, Event};
+
+/// 收到提议的通知以后等多久再看评论（agent 常常一连提几条）。
+pub const COMMENTS_DELAY: Duration = Duration::from_secs(2);
 
 /// 跟着同步的几个时间。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,12 +346,16 @@ pub struct FollowEnv {
     pub author: Author,
     /// 和审核页共用的。
     pub link: FollowLink,
+    /// 审核页对外的地址（`TCMS_PUBLIC_URL`），写进评论里的链接；没有时评论里写提议 id。
+    pub public_url: Option<String>,
 }
 
 /// 跟着同步时发生的事，交给调用的一方（记日志）。
 #[derive(Debug)]
 pub enum FollowEvent<'a> {
     Synced(&'a Job, &'a SyncReport),
+    /// 看了一遍提议显示成的评论，有事做了（或者有几条出错了）。
+    Comments(&'a CommentReport),
     Failed(&'a Error),
     Disconnected(&'a str),
     Reconnected,
@@ -359,7 +370,10 @@ pub async fn follow(
     mut on: impl FnMut(FollowEvent<'_>),
 ) {
     let mut schedule = Schedule::new(opts.clone(), Instant::now());
-    let mut listener = env.store.listen().await.ok();
+    let channels = [NOTIFY_CHANNEL, PROPOSALS_CHANNEL];
+    let mut listener = env.store.listen_to(&channels).await.ok();
+    // 什么时候看一遍评论。
+    let mut comments_at: Option<Instant> = None;
     let mut git_tick = tokio::time::interval(opts.git_poll);
     git_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // 上次看 git 时的 HEAD；没变就不用再比。
@@ -377,6 +391,9 @@ pub async fn follow(
                     env.link.resumed(&resuming);
                     env.link.synced(changed(&report));
                     on(FollowEvent::Synced(&job, &report));
+                    if job == Job::Full {
+                        comments_at.get_or_insert_with(Instant::now);
+                    }
                 }
                 Err(e) => {
                     env.link.failed(&e);
@@ -386,7 +403,22 @@ pub async fn follow(
             }
             continue;
         }
-        let wake = schedule.wake_at(Instant::now());
+        if comments_at.is_some_and(|t| t <= Instant::now()) {
+            comments_at = None;
+            let url = env.public_url.as_deref();
+            match sync_comments(&env.store, affine, &env.workspace, url).await {
+                Ok(r) if r.is_empty() => {}
+                Ok(r) => on(FollowEvent::Comments(&r)),
+                Err(e) => {
+                    env.link.failed(&e);
+                    on(FollowEvent::Failed(&e));
+                    comments_at = Some(Instant::now() + opts.retry);
+                }
+            }
+            continue;
+        }
+        let now = Instant::now();
+        let wake = comments_at.map_or(schedule.wake_at(now), |t| t.min(schedule.wake_at(now)));
         let look_at_git = tokio::select! {
             r = stop.changed() => {
                 if r.is_err() {
@@ -417,16 +449,23 @@ pub async fn follow(
                 schedule.git_changed(docs, !env.link.resuming().is_empty());
                 false
             }
-            r = notice(&mut listener) => {
-                if r.is_err() {
+            r = notice(&mut listener, env.store.schema()) => match r {
+                Ok(Notice::Changes) => true,
+                Ok(Notice::Proposals) => {
+                    let at = Instant::now() + COMMENTS_DELAY;
+                    comments_at = Some(comments_at.map_or(at, |t| t.min(at)));
+                    false
+                }
+                Ok(Notice::Elsewhere) => false,
+                Err(_) => {
                     // 下一次定时看 git 时重新订阅。
                     listener = None;
+                    true
                 }
-                true
-            }
+            },
             _ = git_tick.tick() => {
                 if listener.is_none() {
-                    listener = env.store.listen().await.ok();
+                    listener = env.store.listen_to(&channels).await.ok();
                 }
                 true
             }
@@ -448,11 +487,29 @@ fn changed(report: &SyncReport) -> bool {
             .any(|d| d.to_git.total() + d.to_affine.total() > 0 || d.state == "unlinked")
 }
 
-async fn notice(listener: &mut Option<PgListener>) -> Result<(), tcms_store::Error> {
-    match listener {
-        Some(l) => l.recv().await.map(|_| ()).map_err(Into::into),
-        None => std::future::pending().await,
-    }
+/// 收到的通知。
+enum Notice {
+    /// 索引变了（git 里可能变了）。
+    Changes,
+    /// 这个 schema 的提议建了、批准了、拒绝了。
+    Proposals,
+    /// 同一个库里别的 schema 的提议。
+    Elsewhere,
+}
+
+async fn notice(
+    listener: &mut Option<PgListener>,
+    schema: &str,
+) -> Result<Notice, tcms_store::Error> {
+    let Some(l) = listener else {
+        return std::future::pending().await;
+    };
+    let n = l.recv().await?;
+    Ok(match n.channel() {
+        PROPOSALS_CHANNEL if n.payload() == schema => Notice::Proposals,
+        PROPOSALS_CHANNEL => Notice::Elsewhere,
+        _ => Notice::Changes,
+    })
 }
 
 /// HEAD 变了的话，看哪些文档在 git 里变了、有没有新文件。
