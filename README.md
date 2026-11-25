@@ -42,6 +42,7 @@ TCMS_AFFINE_WORKSPACE=... tcms serve                         # 再一直跟着�
 tcms bench index --check                                      # 索引基准
 tcms bench read --check                                       # 读的基准：编包、检索、找晋升候选
 tcms bench serve --check                                      # 服务的基准：起 tcms serve --stdio 子进程，用 MCP 客户端量
+tcms bench affine --check                                     # 和 AFFiNE 同步的基准：接上、全部看一遍、两边改一条、评论（假 AFFiNE）
 ```
 
 agent 不直接写条目：`context_propose` 只记下提议，人在审核页或用 `tcms accept` 批准以后才写进上下文仓库。命令行批准时审核的人从 `TCMS_ACTOR` 或 `USER` 读，提交者从 `TCMS_GIT_NAME`、`TCMS_GIT_EMAIL` 读；审核页上提交者是登录的人，邮箱从 `TCMS_GIT_EMAIL` 读。人直接改了上下文仓库以后运行 `tcms reindex`。服务收到通知（或每 30 秒查一次）后自己换上新的检索索引。
