@@ -3,9 +3,20 @@
 
 use std::collections::HashMap;
 
-use affine_sync_client::{Client, Config, Error as ClientError, Intent, SyncConnection};
+use affine_sync_client::{Client, Config, Error as ClientError, Intent, SyncConnection, SyncEvent};
 use serde_json::json;
 use yrs::{Doc, ReadTxn, StateVector, Transact};
+
+/// AFFiNE 那边推来的事（一直跟着同步时用，[`crate::follow`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// 别人改了一篇文档（工作区根文档、文件夹树也算）。
+    Changed { workspace: String, doc: String },
+    /// 连接断了，后台在重连。
+    Disconnected(String),
+    /// 又连上了：断开的这段时间里的修改收不到广播，要全部看一遍。
+    Reconnected,
+}
 
 /// 同步要用到的 AFFiNE 接口。
 #[allow(async_fn_in_trait)]
@@ -29,6 +40,17 @@ pub trait Affine {
 
     /// 最近改过的文档是谁最后改的：文档 id → 这个人在 AFFiNE 里的名字。拿不到的不在里面。
     async fn editors(&mut self, workspace: &str) -> Result<HashMap<String, String>, ClientError>;
+
+    /// 要收这几篇文档的修改（取过的已经在收了；新建的要说一下）。
+    async fn watch(&mut self, workspace: &str, docs: &[String]) -> Result<(), ClientError> {
+        let _ = (workspace, docs);
+        Ok(())
+    }
+
+    /// 下一件事。推不来事的实现一直等着。
+    async fn next_event(&mut self) -> Event {
+        std::future::pending().await
+    }
 }
 
 /// 连着的 AFFiNE。
@@ -122,5 +144,39 @@ impl Affine for Server {
                 Some((d.id, (*name).to_owned()))
             })
             .collect())
+    }
+
+    async fn watch(&mut self, workspace: &str, docs: &[String]) -> Result<(), ClientError> {
+        let ids: Vec<&str> = docs.iter().map(String::as_str).collect();
+        self.conn.join(workspace, &ids).await
+    }
+
+    async fn next_event(&mut self) -> Event {
+        loop {
+            match self.conn.next_event().await {
+                Some(
+                    SyncEvent::DocUpdates {
+                        workspace_id,
+                        doc_id,
+                        ..
+                    }
+                    | SyncEvent::DocStale {
+                        workspace_id,
+                        doc_id,
+                    },
+                ) => {
+                    return Event::Changed {
+                        workspace: workspace_id,
+                        doc: doc_id,
+                    };
+                }
+                Some(SyncEvent::Disconnected { reason }) => return Event::Disconnected(reason),
+                Some(SyncEvent::Reconnected) => return Event::Reconnected,
+                // 工作区里有文档变了（自己推的也发）：加入了的文档另有广播，没加入的新文档会改到文件夹树，这里不用。
+                Some(SyncEvent::Invalidated { .. }) => {}
+                // 连接整个没了（后台的重连也退出了）：不会再有事。
+                None => std::future::pending::<()>().await,
+            }
+        }
     }
 }

@@ -7,11 +7,13 @@
 //! 同步（A3）：
 //! - [`plan`]：一篇文档的三方比较（git、AFFiNE、上次同步完的底稿），算出写到哪边、哪些要人处理；
 //! - [`bridge`]：接上范围或文件（[`link`]）、同步一次（[`sync`]）、看状态（[`status`]）、处理冲突（[`resolve`]）；
-//! - [`server`]：同步要 AFFiNE 做的几件事（[`Affine`]）和连真的 AFFiNE 的实现（[`Server`]）。
+//! - [`server`]：同步要 AFFiNE 做的几件事（[`Affine`]）和连真的 AFFiNE 的实现（[`Server`]）；
+//! - [`follow`]：一直跟着同步（`tcms serve` 里跑），AFFiNE 里改完停一下、git 里一变就同步。
 
 pub use affine_doc::*;
 
 pub mod bridge;
+pub mod follow;
 pub mod plan;
 pub mod server;
 
@@ -19,4 +21,5 @@ pub use bridge::{
     AFFINE_EMAIL, Context, Counts, DocReport, DocStatus, Error, Keep, SYNC_TRAILER, Status,
     SyncReport, folders_doc_id, link, resolve, status, sync,
 };
-pub use server::{Affine, Server};
+pub use follow::{FollowEnv, FollowEvent, FollowOptions, Job, Schedule, follow};
+pub use server::{Affine, Event, Server};

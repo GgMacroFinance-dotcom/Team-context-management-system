@@ -46,6 +46,11 @@ services:
       TCMS_SYNC_SECS: ${TCMS_SYNC_SECS:-60}
       # 可选：远端推送通知的密钥，配了以后推上去马上同步（POST /hooks/push）。
       TCMS_WEBHOOK_SECRET: ${TCMS_WEBHOOK_SECRET:-}
+      # 可选：和 AFFiNE 同步（docs/affine-sync.md 7.4）。设了 TCMS_AFFINE_WORKSPACE 才一直跟着同步。
+      TCMS_AFFINE_URL: ${TCMS_AFFINE_URL:-}
+      TCMS_AFFINE_EMAIL: ${TCMS_AFFINE_EMAIL:-}
+      TCMS_AFFINE_PASSWORD: ${TCMS_AFFINE_PASSWORD:-}
+      TCMS_AFFINE_WORKSPACE: ${TCMS_AFFINE_WORKSPACE:-}
     depends_on:
       postgres:
         condition: service_healthy

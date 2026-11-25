@@ -20,9 +20,9 @@ tcms-git.workspace = true
 tcms-store.workspace = true
 tcms-write.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 yrs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
 tcms-index.workspace = true
