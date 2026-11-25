@@ -10,6 +10,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+affine-store.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
@@ -25,8 +26,9 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 webpki-roots.workspace = true
+yrs.workspace = true
 
 [dev-dependencies]
 affine-doc.workspace = true
-yrs.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true

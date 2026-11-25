@@ -31,6 +31,7 @@ name = "affine-sync-client"
 version = "0.1.0"
 dependencies = [
  "affine-doc",
+ "affine-store",
  "base64 0.22.1",
  "bytes",
  "futures-util",
@@ -41,6 +42,7 @@ dependencies = [
  "hyper-util",
  "rustls-pki-types",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-rustls",

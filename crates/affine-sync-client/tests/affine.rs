@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use affine_doc::{RandomIds, Section, workspace};
 use affine_sync_client::{
-    Client, Config, Credentials, DocMode, Error, Intent, SyncConnection, SyncEvent,
-    comment_content, comment_text,
+    Client, Config, Credentials, DocMode, Error, FollowUp, Intent, Replica, SyncConnection,
+    SyncEvent, comment_content, comment_text,
 };
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
@@ -279,4 +279,156 @@ async fn sync_with_a_real_affine() {
     wrong.credentials.email = format!("nobody-{}@example.test", &ws[..8]);
     let err = Client::new(wrong).unwrap().sync().await.err().unwrap();
     assert!(matches!(err, Error::Auth(_)), "{err}");
+}
+
+/// 本地副本：一开始就断着网写本地，连上推上去；再断网写本地、同时别人在服务端改，重启以后连上，两边一样；之后收到的广播直接进库。
+#[tokio::test]
+async fn offline_replica_with_a_real_affine() {
+    let Some(config) = config() else {
+        eprintln!("没设 AFFINE_TEST_URL、AFFINE_TEST_EMAIL、AFFINE_TEST_PASSWORD，跳过");
+        return;
+    };
+    let peer = config.url.clone();
+    let client = Client::new(config).unwrap();
+    let ws = client.create_workspace().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ws.db");
+    let open = || Replica::new(affine_store::Store::open(&path).unwrap(), &ws, &peer).unwrap();
+    let local_doc = |r: &mut Replica, id: &str| {
+        let d = Doc::new();
+        apply(&d, &r.read(id).unwrap().unwrap());
+        d
+    };
+
+    // 还没连：根文档和一篇文档都只写在本地
+    let doc_id = "tcmsOffline1";
+    let mut r = open();
+    let root = Doc::new();
+    r.write(&ws, &add_page(&root, doc_id, "断网测试")).unwrap();
+    let page = Doc::new();
+    let md = "## 第一条\n\n开头\n\n## 第二条\n\n也是开头";
+    affine_doc::create(
+        &page,
+        "断网测试",
+        &affine_doc::to_blocks(md),
+        &mut RandomIds,
+    )
+    .unwrap();
+    r.write(
+        doc_id,
+        &page
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default()),
+    )
+    .unwrap();
+    assert_eq!(r.pending().unwrap().len(), 2);
+
+    // 连上：两篇都推上去，另一条连接读得到
+    let a = client.sync().await.unwrap();
+    let report = r.sync_all(&a).await.unwrap();
+    assert!(
+        report.pushed.contains(&ws) && report.pushed.contains(&doc_id.to_owned()),
+        "{report:?}"
+    );
+    assert!(r.pending().unwrap().is_empty());
+    let b = client.sync().await.unwrap();
+    let b_doc = Doc::new();
+    apply(
+        &b_doc,
+        &b.load_doc(&ws, doc_id, None).await.unwrap().unwrap().update,
+    );
+    assert_eq!(markdown(&b_doc), md);
+    let pages = {
+        let d = Doc::new();
+        apply(
+            &d,
+            &b.load_doc(&ws, &ws, None).await.unwrap().unwrap().update,
+        );
+        workspace::read_meta(&d).pages
+    };
+    assert!(pages.iter().any(|p| p.id == doc_id), "{pages:?}");
+
+    // 断网（连接丢掉）：本地改第一条；同时别人在服务端改第二条
+    drop(a);
+    let edit = |doc: &Doc, n: usize, body: &str| {
+        let it = affine_doc::split(&affine_doc::read(doc).unwrap().blocks)
+            .into_iter()
+            .filter_map(|s| match s {
+                Section::Item(i) => Some(i),
+                Section::Loose(_) => None,
+            })
+            .nth(n)
+            .unwrap();
+        let sv = doc.transact().state_vector();
+        affine_doc::update_item(
+            doc,
+            it.heading_id.as_deref().unwrap(),
+            &it.title,
+            &affine_doc::to_blocks(body),
+            &mut RandomIds,
+        )
+        .unwrap();
+        doc.transact().encode_state_as_update_v1(&sv)
+    };
+    let mine = local_doc(&mut r, doc_id);
+    r.write(doc_id, &edit(&mine, 0, "开头\n\n本地断网时写的"))
+        .unwrap();
+    let theirs = edit(&b_doc, 1, "也是开头\n\n别人同时在服务端写的");
+    b.push_update(&ws, doc_id, &theirs, Intent::Update)
+        .await
+        .unwrap();
+    assert_eq!(r.pending().unwrap(), [doc_id]);
+
+    // 重启（库关掉再开），再连上：拉到别人的、推上自己的，两边一样
+    drop(r);
+    let mut r = open();
+    assert_eq!(r.pending().unwrap(), [doc_id]);
+    let mut a = client.sync().await.unwrap();
+    let report = r.sync_all(&a).await.unwrap();
+    assert!(
+        report.pulled.contains(&doc_id.to_owned()) && report.pushed.contains(&doc_id.to_owned()),
+        "{report:?}"
+    );
+    let merged = markdown(&local_doc(&mut r, doc_id));
+    assert!(
+        merged.contains("本地断网时写的") && merged.contains("别人同时在服务端写的"),
+        "{merged}"
+    );
+    let sv = b_doc.transact().state_vector().encode_v1();
+    apply(
+        &b_doc,
+        &b.load_doc(&ws, doc_id, Some(&sv))
+            .await
+            .unwrap()
+            .unwrap()
+            .update,
+    );
+    assert_eq!(markdown(&b_doc), merged);
+    assert!(r.pending().unwrap().is_empty());
+
+    // 连着的时候别人再改：广播直接进库，不用再拉
+    let more = edit(
+        &b_doc,
+        1,
+        "也是开头\n\n别人同时在服务端写的\n\n连着的时候又写的",
+    );
+    b.push_update(&ws, doc_id, &more, Intent::Update)
+        .await
+        .unwrap();
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), a.next_event())
+            .await
+            .expect("等广播超时")
+            .expect("连接没了");
+        if matches!(&ev, SyncEvent::DocUpdates { doc_id: d, .. } if d == doc_id) {
+            assert_eq!(r.apply_event(&ev).unwrap(), FollowUp::Nothing);
+            break;
+        }
+    }
+    assert_eq!(markdown(&local_doc(&mut r, doc_id)), markdown(&b_doc));
+    let report = r.sync_all(&a).await.unwrap();
+    assert!(
+        report.pulled.is_empty() && report.pushed.is_empty(),
+        "{report:?}"
+    );
 }
