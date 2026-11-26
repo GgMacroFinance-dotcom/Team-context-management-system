@@ -88,8 +88,9 @@ fn env(name: &str) -> Result<String> {
     }
 }
 
-async fn server() -> Result<Server> {
-    let config = affine_sync_client::Config {
+/// 连 AFFiNE 的设置（`TCMS_AFFINE_URL`、`TCMS_AFFINE_EMAIL`、`TCMS_AFFINE_PASSWORD`，可选 `TCMS_AFFINE_CA`）。
+pub(crate) fn config() -> Result<affine_sync_client::Config> {
+    Ok(affine_sync_client::Config {
         url: env("TCMS_AFFINE_URL")?,
         credentials: affine_sync_client::Credentials {
             email: env("TCMS_AFFINE_EMAIL")?,
@@ -99,8 +100,11 @@ async fn server() -> Result<Server> {
         extra_ca: std::env::var_os("TCMS_AFFINE_CA")
             .filter(|v| !v.is_empty())
             .map(Into::into),
-    };
-    Server::connect(config).await.context("连 AFFiNE")
+    })
+}
+
+async fn server() -> Result<Server> {
+    Server::connect(config()?).await.context("连 AFFiNE")
 }
 
 pub async fn run(
