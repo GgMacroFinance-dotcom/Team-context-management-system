@@ -237,6 +237,18 @@ async fn sync_with_a_real_affine() {
         "{:?}",
         recent.items
     );
+    // 一篇文档最后是谁改的（a、b 是同一个账号）；还没有的文档是 None。
+    let me = client
+        .graphql("{ currentUser { name } }", serde_json::json!({}))
+        .await
+        .unwrap();
+    let name = me["currentUser"]["name"].as_str().map(str::to_owned);
+    assert!(name.is_some(), "{me}");
+    assert_eq!(client.last_updated_by(&ws, doc_id).await.unwrap(), name);
+    assert_eq!(
+        client.last_updated_by(&ws, "tcmsNoSuchDoc").await.unwrap(),
+        None
+    );
     let content = comment_content(&["提议：把第二条改成这样", "理由：……"], Some("编号")).unwrap();
     let c = client
         .create_comment(&ws, doc_id, "测试文档", DocMode::Page, content)
