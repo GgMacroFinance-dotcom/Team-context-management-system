@@ -675,8 +675,8 @@ struct Run<'r> {
     resume: &'r [String],
     /// 文档 id →（从哪个状态取的，取回来的差量）：拿锁以后记下的状态没变就不再取。
     fetched: HashMap<String, (Vec<u8>, Option<Vec<u8>>)>,
-    /// 文档 id → 最后改的人；要往 git 写的时候才去问。
-    editors: Option<HashMap<String, String>>,
+    /// 文档 id → 最后改的人（不知道是谁时是 `None`）；要往 git 写的时候才去问这一篇。
+    editors: HashMap<String, Option<String>>,
 }
 
 impl Run<'_> {
@@ -802,11 +802,12 @@ impl Run<'_> {
     }
 
     async fn editor(&mut self, affine: &mut impl Affine, doc_id: &str) -> Author {
-        if self.editors.is_none() {
+        if !self.editors.contains_key(doc_id) {
             // 拿不到名字不影响同步，提交的作者写“AFFiNE”。
-            self.editors = Some(affine.editors(&self.ws.id).await.unwrap_or_default());
+            let name = affine.editor(&self.ws.id, doc_id).await.ok().flatten();
+            self.editors.insert(doc_id.to_owned(), name);
         }
-        affine_author(self.editors.as_ref().and_then(|m| m.get(doc_id)))
+        affine_author(self.editors.get(doc_id).and_then(Option::as_ref))
     }
 }
 
@@ -846,7 +847,7 @@ pub(crate) async fn sync_docs(
         states: HashMap::new(),
         resume,
         fetched: HashMap::new(),
-        editors: None,
+        editors: HashMap::new(),
     };
     if eager {
         run.lock(cx).await?;

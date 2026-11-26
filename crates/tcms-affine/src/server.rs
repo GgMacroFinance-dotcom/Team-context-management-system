@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use affine_sync_client::{
     Client, Comment, Config, DocMode, Error as ClientError, Intent, SyncConnection, SyncEvent,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use yrs::{Doc, ReadTxn, StateVector, Transact};
 
 /// AFFiNE 那边推来的事（一直跟着同步时用，[`crate::follow`]）。
@@ -40,8 +40,8 @@ pub trait Affine {
         create: bool,
     ) -> Result<(), ClientError>;
 
-    /// 最近改过的文档是谁最后改的：文档 id → 这个人在 AFFiNE 里的名字。拿不到的不在里面。
-    async fn editors(&mut self, workspace: &str) -> Result<HashMap<String, String>, ClientError>;
+    /// 一篇文档最后是谁改的：这个人在 AFFiNE 里的名字（写进 git 提交的作者）。不知道是谁时是 `None`。
+    async fn editor(&mut self, workspace: &str, doc: &str) -> Result<Option<String>, ClientError>;
 
     /// 一篇文档上的评论，带回复（提议显示成评论，[`crate::comments`]）。
     async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError>;
@@ -166,32 +166,8 @@ impl Affine for Server {
         Ok(())
     }
 
-    async fn editors(&mut self, workspace: &str) -> Result<HashMap<String, String>, ClientError> {
-        let recent = self
-            .client
-            .recently_updated_docs(workspace, 100, None)
-            .await?;
-        let members = self
-            .client
-            .graphql(
-                "query($id: String!) { workspace(id: $id) { members(skip: 0, take: 200) { id name } } }",
-                json!({ "id": workspace }),
-            )
-            .await?;
-        let names: HashMap<&str, &str> = members["workspace"]["members"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|m| Some((m["id"].as_str()?, m["name"].as_str()?)))
-            .collect();
-        Ok(recent
-            .items
-            .into_iter()
-            .filter_map(|d| {
-                let name = names.get(d.last_updater_id.as_deref()?)?;
-                Some((d.id, (*name).to_owned()))
-            })
-            .collect())
+    async fn editor(&mut self, workspace: &str, doc: &str) -> Result<Option<String>, ClientError> {
+        self.client.last_updated_by(workspace, doc).await
     }
 
     async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {

@@ -131,6 +131,28 @@ impl Client {
         })
     }
 
+    /// 一篇文档最后是谁改的：这个人在 AFFiNE 里的名字。服务端还没有这篇（`DOC_NOT_FOUND`）、不知道是谁时是 `None`。
+    /// 只问这一篇，不用列最近改过的文档再对成员表（`docs/affine-sync.md` 7.12）。
+    pub async fn last_updated_by(
+        &self,
+        workspace_id: &str,
+        doc_id: &str,
+    ) -> Result<Option<String>, Error> {
+        let data = self
+            .graphql(
+                "query($workspaceId: String!, $docId: String!) {
+                   workspace(id: $workspaceId) { doc(docId: $docId) { lastUpdatedBy { name } } }
+                 }",
+                json!({ "workspaceId": workspace_id, "docId": doc_id }),
+            )
+            .await;
+        match data {
+            Ok(d) => Ok(opt_string(&d["workspace"]["doc"]["lastUpdatedBy"], "name")),
+            Err(Error::Remote { name, .. }) if name == "DOC_NOT_FOUND" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// 一篇文档上的所有评论（自己翻页）。
     pub async fn comments(&self, workspace_id: &str, doc_id: &str) -> Result<Vec<Comment>, Error> {
         let query = format!(

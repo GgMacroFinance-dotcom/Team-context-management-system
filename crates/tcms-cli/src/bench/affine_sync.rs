@@ -155,14 +155,13 @@ impl Affine for Shared {
         Ok(Some(self.fake.borrow().stamps.clone()))
     }
 
-    async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
+    async fn editor(&mut self, _ws: &str, doc: &str) -> Result<Option<String>, ClientError> {
         Ok(self
             .fake
             .borrow()
             .docs
-            .keys()
-            .map(|k| (k.clone(), "基准".to_owned()))
-            .collect())
+            .contains_key(doc)
+            .then(|| "基准".to_owned()))
     }
 
     async fn comments(&mut self, _ws: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {

@@ -144,11 +144,9 @@ impl Memory {
             .collect()
     }
 
-    fn editors_now(&self) -> HashMap<String, String> {
-        self.docs
-            .keys()
-            .map(|k| (k.clone(), "小王".to_owned()))
-            .collect()
+    /// 每篇文档都是小王最后改的；没有这篇时不知道是谁。
+    fn editor_now(&self, doc: &str) -> Option<String> {
+        self.docs.contains_key(doc).then(|| "小王".to_owned())
     }
 
     fn new_comment(&mut self, user: &str, content: Value) -> Comment {
@@ -218,8 +216,8 @@ impl Affine for Memory {
         Ok(())
     }
 
-    async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
-        Ok(self.editors_now())
+    async fn editor(&mut self, _ws: &str, doc: &str) -> Result<Option<String>, ClientError> {
+        Ok(self.editor_now(doc))
     }
 
     async fn comments(&mut self, _ws: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
@@ -298,8 +296,8 @@ impl Affine for Shared {
         Ok(())
     }
 
-    async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
-        Ok(self.mem.borrow().editors_now())
+    async fn editor(&mut self, _ws: &str, doc: &str) -> Result<Option<String>, ClientError> {
+        Ok(self.mem.borrow().editor_now(doc))
     }
 
     async fn comments(&mut self, _ws: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
