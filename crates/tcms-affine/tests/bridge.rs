@@ -4,8 +4,9 @@
 //! 需要环境变量 `TCMS_TEST_DATABASE_URL`，规则和别的集成测试一样：本地没设就跳过，CI 里没设算失败。
 //! 查提交历史用 git 命令行。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
@@ -46,6 +47,8 @@ struct Memory {
     /// 一次取几篇的评论问了几次；模拟一次取几篇时出错。
     batches: usize,
     fail_batch: bool,
+    /// 取了几次文档（看全部看一遍时跳过了没变的）。
+    loads: Cell<usize>,
 }
 
 impl Memory {
@@ -108,6 +111,7 @@ impl Memory {
 
 impl Memory {
     fn load_now(&self, doc: &str, sv: Option<&[u8]>) -> Option<Vec<u8>> {
+        self.loads.set(self.loads.get() + 1);
         let d = self.docs.get(doc)?;
         let sv = match sv {
             Some(b) => StateVector::decode_v1(b).unwrap(),
@@ -123,6 +127,21 @@ impl Memory {
         d.transact_mut()
             .apply_update(Update::decode_v1(update).unwrap())
             .unwrap();
+    }
+
+    /// 每篇文档“最后改的时间”：用整篇状态的哈希代替，文档一变就变（真 AFFiNE 是毫秒时间戳）。
+    /// 不能只用状态向量：只删了东西时状态向量不变。
+    fn stamps_now(&self) -> HashMap<String, i64> {
+        self.docs
+            .iter()
+            .map(|(id, d)| {
+                let mut h = DefaultHasher::new();
+                d.transact()
+                    .encode_state_as_update_v1(&StateVector::default())
+                    .hash(&mut h);
+                (id.clone(), h.finish() as i64)
+            })
+            .collect()
     }
 
     fn editors_now(&self) -> HashMap<String, String> {
@@ -243,6 +262,13 @@ impl Affine for Memory {
             .map(|d| (d.clone(), self.comments.get(d).cloned().unwrap_or_default()))
             .collect())
     }
+
+    async fn doc_timestamps(
+        &mut self,
+        _ws: &str,
+    ) -> Result<Option<HashMap<String, i64>>, ClientError> {
+        Ok(Some(self.stamps_now()))
+    }
 }
 
 /// 跟着同步的测试用：同步程序和测试脚本用同一个假 AFFiNE；脚本模拟人改了以后发一个广播。
@@ -305,6 +331,13 @@ impl Affine for Shared {
     async fn resolve_comment(&mut self, id: &str) -> Result<(), ClientError> {
         self.mem.borrow_mut().comment_mut(id)?.resolved = true;
         Ok(())
+    }
+
+    async fn doc_timestamps(
+        &mut self,
+        _ws: &str,
+    ) -> Result<Option<HashMap<String, i64>>, ClientError> {
+        Ok(Some(self.mem.borrow().stamps_now()))
     }
 
     async fn next_event(&mut self) -> Event {
@@ -568,6 +601,83 @@ async fn edits_go_both_ways() {
     assert_eq!(items[1].2, "PMI 只用统计局的。");
     let r = f.sync(&mut affine, &[]).await;
     assert!(quiet(&r), "{r:?}");
+}
+
+#[tokio::test]
+async fn full_sync_skips_unchanged_docs() {
+    let Some((f, mut affine)) = linked().await else {
+        return;
+    };
+    let doc_id = affine.page_id("数据源");
+    let table_id = affine.page_id("表格");
+    const TABLE: &str = "role-macro/表格.md";
+    let stamp = |store: &Store, path: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .affine_docs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|d| d.path == path)
+                .unwrap()
+                .affine_ts
+        }
+    };
+
+    // 接上时推过两篇，还没记 AFFiNE 说的时间：第一次全部看一遍每篇都取，两边都没变，记下来。
+    assert_eq!(stamp(&f.store, MACRO).await, None);
+    let r = f.sync(&mut affine, &[]).await;
+    assert!(quiet(&r), "{r:?}");
+    let now = affine.stamps_now();
+    assert_eq!(stamp(&f.store, MACRO).await, Some(now[&doc_id]));
+    assert_eq!(stamp(&f.store, TABLE).await, Some(now[&table_id]));
+
+    // 再看一遍：两篇都不取，只取工作区根文档和文件夹树。
+    affine.loads.set(0);
+    let r = f.sync(&mut affine, &[]).await;
+    assert!(quiet(&r), "{r:?}");
+    assert_eq!(affine.loads.get(), 2);
+
+    // 人在 AFFiNE 里改了一篇：只取这篇。存了同步结果，记的时间清掉，下次看一遍再取一次、再记下。
+    affine.human_edit(&doc_id, "PMI", "PMI", "PMI 只用财新的。");
+    affine.loads.set(0);
+    let r = f.sync(&mut affine, &[]).await;
+    let state = |r: &SyncReport, p: &str| r.docs.iter().find(|d| d.path == p).unwrap().state;
+    assert_eq!(
+        (state(&r, MACRO), state(&r, TABLE)),
+        ("synced", "unchanged")
+    );
+    assert_eq!(affine.loads.get(), 3);
+    assert!(f.read(MACRO).unwrap().contains("PMI 只用财新的。"));
+    assert_eq!(stamp(&f.store, MACRO).await, None);
+    let r = f.sync(&mut affine, &[]).await;
+    assert!(quiet(&r), "{r:?}");
+    assert_eq!(
+        stamp(&f.store, MACRO).await,
+        Some(affine.stamps_now()[&doc_id])
+    );
+
+    // 人改了 git 里的另一篇：AFFiNE 说的时间没变也要取，改动推过去。
+    let text = f
+        .read(TABLE)
+        .unwrap()
+        .replace("| CPI | 统计局 |", "| CPI | 统计局、Wind |");
+    f.git_commit(&[put(TABLE, &text)]).await;
+    affine.loads.set(0);
+    let r = f.sync(&mut affine, &[]).await;
+    assert_eq!(
+        (state(&r, MACRO), state(&r, TABLE)),
+        ("unchanged", "synced")
+    );
+    assert_eq!(affine.loads.get(), 3);
+    assert!(affine.items(&table_id)[0].2.contains("统计局、Wind"));
+    let r = f.sync(&mut affine, &[]).await;
+    assert!(quiet(&r), "{r:?}");
+    affine.loads.set(0);
+    let r = f.sync(&mut affine, &[]).await;
+    assert!(quiet(&r), "{r:?}");
+    assert_eq!(affine.loads.get(), 2);
 }
 
 #[tokio::test]

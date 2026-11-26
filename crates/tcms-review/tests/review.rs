@@ -1338,6 +1338,7 @@ fn affine_doc(path: &str, doc_id: &str, paused: Option<&str>) -> AffineDoc {
         synced_commit: None,
         paused: paused.map(str::to_owned),
         synced_at: String::new(),
+        affine_ts: None,
     }
 }
 

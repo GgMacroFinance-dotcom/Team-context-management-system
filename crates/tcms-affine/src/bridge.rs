@@ -605,6 +605,7 @@ async fn link_file(
                 synced_commit: at.head.map(|h| h.to_string()),
                 paused: None,
                 synced_at: String::new(),
+                affine_ts: None,
             },
             state,
             set: bases,
@@ -937,16 +938,68 @@ pub(crate) async fn sync_docs(
         })
         .map(|d| d.path.clone())
         .collect();
-    run.load_states(cx.store, &targets).await?;
+    // 全部看一遍：先问 AFFiNE 每篇最后改的时间。上次两边都没变、这次 AFFiNE 说的时间也一样、git 里也没变的不取
+    // （docs/affine-sync.md 7.11）。问不到就每篇都取。
+    let stamps = match only {
+        None => affine
+            .doc_timestamps(cx.workspace)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        Some(_) => HashMap::new(),
+    };
+    let mut to_load = Vec::new();
+    for path in &targets {
+        if unchanged_since(cx, &mut run, path, &stamps, &trashed)?.is_none() {
+            to_load.push(path.clone());
+        }
+    }
+    run.load_states(cx.store, &to_load).await?;
+    let mut seen: Vec<(String, i64)> = Vec::new();
     for path in targets {
+        if let Some(r) = unchanged_since(cx, &mut run, &path, &stamps, &trashed)? {
+            report.docs.push(r);
+            continue;
+        }
         let r = sync_doc(cx, affine, &mut run, &path).await?;
+        if r.state == "unchanged"
+            && let Some(t) = r.doc_id.as_ref().and_then(|id| stamps.get(id))
+        {
+            seen.push((path.clone(), *t));
+        }
         report.docs.push(r);
     }
+    cx.store.set_affine_ts(&seen).await?;
     run.ws.push(affine).await?;
     if let Some(batch) = run.batch.take() {
         finish(cx, batch, &mut report, "affine.sync", cx.workspace).await?;
     }
     Ok(report)
+}
+
+/// 全部看一遍时可以不取的文档：上次全部看一遍时两边都没变，记下的 AFFiNE 最后改的时间和这次 `stamps` 里的一样，
+/// git 里也和上次同步完一样，没停着、没要接着做、没移进回收站。返回给报告用的一行。
+fn unchanged_since(
+    cx: &Context<'_>,
+    run: &mut Run<'_>,
+    path: &str,
+    stamps: &HashMap<String, i64>,
+    trashed: &HashSet<String>,
+) -> Result<Option<DocReport>, Error> {
+    let Some(d) = run.doc(path) else {
+        return Ok(None);
+    };
+    let same_in_affine = d.affine_ts.is_some() && d.affine_ts == stamps.get(&d.doc_id).copied();
+    if !same_in_affine
+        || d.paused.is_some()
+        || run.resume.iter().any(|p| p == path)
+        || trashed.contains(&d.doc_id)
+        || run.blob(cx.repo, path)? != d.git_blob
+    {
+        return Ok(None);
+    }
+    Ok(Some(DocReport::new(path, Some(&d.doc_id), "unchanged")))
 }
 
 /// 范围的文件夹还在就用它；人在 AFFiNE 里删了就新建一个（要拿锁，记下新的文件夹 id）。
@@ -1506,6 +1559,7 @@ async fn file_from_doc(
                 synced_commit: Some(commit.to_string()),
                 paused: None,
                 synced_at: String::new(),
+                affine_ts: None,
             },
             state: full_state(&local),
             set: bases,

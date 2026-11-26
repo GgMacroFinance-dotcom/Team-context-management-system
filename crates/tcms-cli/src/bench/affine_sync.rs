@@ -3,7 +3,8 @@
 //! Yjs 文档，收发更新、存评论），量的是本系统这一侧：
 //!
 //! - 第一次接上：一个范围 1 千条（50 个文件），在 AFFiNE 里建文件夹和 50 篇文档、记下底稿；
-//! - 全部看一遍、两边都没变（跟着同步时每 5 分钟一次）；
+//! - 全部看一遍、两边都没变（跟着同步时每 5 分钟一次）：接上以后第一次每篇都取，单独报；之后 AFFiNE 说最后改的
+//!   时间没变的不取（`docs/affine-sync.md` 7.11），量的是这种；
 //! - 跟着同步（`follow`，等人停手的 10 秒改成 0）：AFFiNE 里改一条，从收到广播到 git 里提交完；
 //!   git 里改一条，从提交、更新索引到写进 AFFiNE；
 //! - 跟着同步、空闲时比开始跟着同步之前多用的物理内存；
@@ -40,7 +41,7 @@ use super::{ITEMS_PER_FILE, Percentiles, ms, percentiles, rss_kb, temp_schema};
 
 /// 第一次接上 1 千条的门槛（条数不同时按比例换算）。
 const LINK_LIMIT_1K: Duration = Duration::from_secs(2);
-/// 全部看一遍、两边都没变（1 千条），p95 的门槛（条数不同时按比例换算）。
+/// 全部看一遍、两边都没变（1 千条），p95 的门槛（条数不同时按比例换算）。接上以后第一次（每篇都取）也用它。
 const FULL_LIMIT_1K: Duration = Duration::from_millis(200);
 /// AFFiNE 里改一条到 git 里提交完，p95 的门槛。不随条数换算：只同步改了的那一篇（`docs/affine-sync.md` 7.8）。
 const TO_GIT_LIMIT: Duration = Duration::from_millis(250);
@@ -63,6 +64,9 @@ const WAIT: Duration = Duration::from_secs(30);
 #[derive(Default)]
 struct Fake {
     docs: HashMap<String, Doc>,
+    /// 每篇文档“最后改的时间”：改一次加一（真 AFFiNE 是毫秒时间戳）。
+    stamps: HashMap<String, i64>,
+    clock: i64,
     comments: HashMap<String, Vec<Comment>>,
     count: usize,
 }
@@ -72,6 +76,11 @@ impl Fake {
         self.docs
             .get(id)
             .with_context(|| format!("假 AFFiNE 里没有 {id}"))
+    }
+
+    fn touch(&mut self, doc: &str) {
+        self.clock += 1;
+        self.stamps.insert(doc.to_owned(), self.clock);
     }
 
     fn comment_mut(&mut self, id: &str) -> Result<&mut Comment, ClientError> {
@@ -132,10 +141,18 @@ impl Affine for Shared {
     ) -> Result<(), ClientError> {
         let update = Update::decode_v1(update).map_err(|e| ClientError::Protocol(e.to_string()))?;
         let mut fake = self.fake.borrow_mut();
+        fake.touch(doc);
         let d = fake.docs.entry(doc.to_owned()).or_default();
         d.transact_mut()
             .apply_update(update)
             .map_err(|e| ClientError::Protocol(e.to_string()))
+    }
+
+    async fn doc_timestamps(
+        &mut self,
+        _ws: &str,
+    ) -> Result<Option<HashMap<String, i64>>, ClientError> {
+        Ok(Some(self.fake.borrow().stamps.clone()))
     }
 
     async fn editors(&mut self, _ws: &str) -> Result<HashMap<String, String>, ClientError> {
@@ -220,6 +237,7 @@ struct FakeHuman {
 impl Human for FakeHuman {
     async fn edit(&mut self, doc_id: &str, title: &str, body: &str) -> Result<Instant> {
         edit_item(self.fake.borrow().doc(doc_id)?, title, body)?;
+        self.fake.borrow_mut().touch(doc_id);
         let t = Instant::now();
         self.events.send(Event::Changed {
             workspace: WS.to_owned(),
@@ -355,6 +373,11 @@ pub async fn run(items: usize, edits: usize, check: bool, real: bool) -> Result<
         ms(m.link),
         limit("", link_limit)
     );
+    println!(
+        "  第一次全部看一遍（每篇都取）   {:>7.1} 毫秒{}",
+        ms(m.first_full),
+        limit("", full_limit)
+    );
     line("全部看一遍、两边都没变    ", &m.full, full_limit);
     line("AFFiNE 里改一条到提交完   ", &m.to_git, TO_GIT_LIMIT);
     line("git 里改一条到写进 AFFiNE ", &m.to_affine, TO_AFFINE_LIMIT);
@@ -389,6 +412,9 @@ pub async fn run(items: usize, edits: usize, check: bool, real: bool) -> Result<
     if m.link > link_limit {
         failed.push("第一次接上");
     }
+    if m.first_full > full_limit {
+        failed.push("第一次全部看一遍");
+    }
     if m.full.p95 > full_limit {
         failed.push("全部看一遍");
     }
@@ -416,6 +442,8 @@ pub async fn run(items: usize, edits: usize, check: bool, real: bool) -> Result<
 
 struct Measured {
     link: Duration,
+    /// 接上以后第一次全部看一遍（每篇都取）。
+    first_full: Duration,
     full: Percentiles,
     to_git: Percentiles,
     to_affine: Percentiles,
@@ -521,9 +549,9 @@ async fn measure(
         ids.len()
     );
 
-    // 全部看一遍、两边都没变。
-    let mut full = Vec::with_capacity(FULL_RUNS);
-    for _ in 0..FULL_RUNS {
+    // 全部看一遍、两边都没变。接上以后第一次还没记 AFFiNE 说的时间，每篇都取。
+    let mut full = Vec::with_capacity(FULL_RUNS + 1);
+    for _ in 0..=FULL_RUNS {
         let t = Instant::now();
         let r = sync(&cx, affine, &[]).await?;
         full.push(t.elapsed());
@@ -532,6 +560,7 @@ async fn measure(
             "两边都没变时同步出了变化"
         );
     }
+    let first_full = full.remove(0);
 
     let doc_ids: HashMap<String, String> = store
         .affine_docs()
@@ -640,6 +669,7 @@ async fn measure(
 
     Ok(Measured {
         link: link_took,
+        first_full,
         full: percentiles(full),
         to_git,
         to_affine,
