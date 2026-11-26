@@ -46,6 +46,20 @@ pub trait Affine {
     /// 一篇文档上的评论，带回复（提议显示成评论，[`crate::comments`]）。
     async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError>;
 
+    /// 几篇文档上的评论，按文档 id，每篇都在结果里。默认一篇一篇问；连真 AFFiNE 时一次问几篇。
+    async fn comments_of(
+        &mut self,
+        workspace: &str,
+        docs: &[String],
+    ) -> Result<HashMap<String, Vec<Comment>>, ClientError> {
+        let mut out = HashMap::new();
+        for d in docs {
+            let listed = self.comments(workspace, d).await?;
+            out.insert(d.clone(), listed);
+        }
+        Ok(out)
+    }
+
     /// 在一篇文档上发一条评论（`content` 用 `affine_sync_client::comment_spans` 做），返回评论的 id。
     async fn create_comment(
         &mut self,
@@ -173,6 +187,19 @@ impl Affine for Server {
 
     async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
         self.client.comments(workspace, doc).await
+    }
+
+    async fn comments_of(
+        &mut self,
+        workspace: &str,
+        docs: &[String],
+    ) -> Result<HashMap<String, Vec<Comment>>, ClientError> {
+        Ok(self
+            .client
+            .comments_of(workspace, docs)
+            .await?
+            .into_iter()
+            .collect())
     }
 
     async fn create_comment(

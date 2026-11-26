@@ -113,7 +113,8 @@ pub async fn sync_comments(
         }
     }
 
-    // 发过、还没关的：一篇文档取一次评论。
+    // 发过、还没关的：这几篇文档的评论一次取齐（连真 AFFiNE 时一次查询问几篇）。一次取出错时一篇一篇取，
+    // 一篇的错不耽误别的。
     let mut open: BTreeMap<&str, Vec<&AffineComment>> = BTreeMap::new();
     for c in comments
         .iter()
@@ -121,15 +122,27 @@ pub async fn sync_comments(
     {
         open.entry(c.doc_id.as_str()).or_default().push(c);
     }
+    let doc_ids: Vec<String> = open.keys().map(|d| (*d).to_owned()).collect();
+    let mut all = if doc_ids.is_empty() {
+        HashMap::new()
+    } else {
+        affine
+            .comments_of(workspace, &doc_ids)
+            .await
+            .unwrap_or_default()
+    };
     for (doc_id, rows) in open {
-        let listed = match affine.comments(workspace, doc_id).await {
-            Ok(l) => l,
-            Err(e) => {
-                report
-                    .errors
-                    .push(format!("取 {} 上的评论：{e}", rows[0].path));
-                continue;
-            }
+        let listed = match all.remove(doc_id) {
+            Some(l) => l,
+            None => match affine.comments(workspace, doc_id).await {
+                Ok(l) => l,
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("取 {} 上的评论：{e}", rows[0].path));
+                    continue;
+                }
+            },
         };
         let by_id: HashMap<&str, &Comment> = listed.iter().map(|c| (c.id.as_str(), c)).collect();
         for row in rows {

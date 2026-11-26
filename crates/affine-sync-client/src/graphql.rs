@@ -2,10 +2,15 @@
 //!
 //! 查询的写法照 AFFiNE 网页版用的那几个（`packages/common/graphql` 里的 `.gql`，MIT），只要用得到的字段。
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::Error;
 use crate::client::Client;
+
+/// [`Client::comments_of`] 一次查询问几篇文档。
+pub const DOCS_PER_QUERY: usize = 25;
 
 /// 这个账号能看到的一个工作区。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +137,7 @@ impl Client {
             "query($workspaceId: String!, $docId: String!, $pagination: PaginationInput) {{
                workspace(id: $workspaceId) {{
                  comments(docId: $docId, pagination: $pagination) {{
+                   totalCount
                    pageInfo {{ endCursor hasNextPage }}
                    edges {{ node {{ {COMMENT_FIELDS} }} }}
                  }}
@@ -147,13 +153,62 @@ impl Client {
                     json!({ "workspaceId": workspace_id, "docId": doc_id, "pagination": { "first": 100, "after": after } }),
                 )
                 .await?;
-            let p = page(get(&data, &["workspace", "comments"])?, comment)?;
+            let conn = get(&data, &["workspace", "comments"])?;
+            let total = total_count(conn);
+            let p = page(conn, comment)?;
             out.extend(p.items);
-            match (p.has_next_page, p.end_cursor) {
+            let more = total.map_or(p.has_next_page, |t| out.len() < t);
+            match (more, p.end_cursor) {
                 (true, Some(c)) if after.as_deref() != Some(c.as_str()) => after = Some(c),
                 _ => return Ok(out),
             }
         }
+    }
+
+    /// 几篇文档上的所有评论，按文档 id，每篇都在结果里。一次查询问 [`DOCS_PER_QUERY`] 篇（同一个字段用
+    /// GraphQL 别名问几遍），比一篇一篇问省往返：2026-11-25 对着 0.27.5-beta.3 量，30 篇一篇一篇问约 1 秒，
+    /// 一次问约 0.13 秒。某篇一页（100 条）放不下时那一篇再用 [`Client::comments`] 自己翻页。
+    pub async fn comments_of(
+        &self,
+        workspace_id: &str,
+        doc_ids: &[String],
+    ) -> Result<BTreeMap<String, Vec<Comment>>, Error> {
+        let mut out = BTreeMap::new();
+        for chunk in doc_ids.chunks(DOCS_PER_QUERY) {
+            let mut params = String::new();
+            let mut fields = String::new();
+            let mut variables = serde_json::Map::new();
+            variables.insert("workspaceId".to_owned(), json!(workspace_id));
+            for (i, doc_id) in chunk.iter().enumerate() {
+                params.push_str(&format!(", $d{i}: String!"));
+                fields.push_str(&format!(
+                    "c{i}: comments(docId: $d{i}, pagination: {{ first: 100 }}) {{
+                       totalCount
+                       pageInfo {{ endCursor hasNextPage }}
+                       edges {{ node {{ {COMMENT_FIELDS} }} }}
+                     }}
+                     "
+                ));
+                variables.insert(format!("d{i}"), json!(doc_id));
+            }
+            let query = format!(
+                "query($workspaceId: String!{params}) {{ workspace(id: $workspaceId) {{ {fields} }} }}"
+            );
+            let data = self.graphql(&query, Value::Object(variables)).await?;
+            for (i, doc_id) in chunk.iter().enumerate() {
+                let key = format!("c{i}");
+                let conn = get(&data, &["workspace", key.as_str()])?;
+                let total = total_count(conn);
+                let p = page(conn, comment)?;
+                let items = if total.map_or(p.has_next_page, |t| p.items.len() < t) {
+                    self.comments(workspace_id, doc_id).await?
+                } else {
+                    p.items
+                };
+                out.insert(doc_id.clone(), items);
+            }
+        }
+        Ok(out)
     }
 
     /// 发一条评论。`content` 用 [`comment_content`] 做。
@@ -411,6 +466,15 @@ fn comment(n: &Value) -> Result<Comment, Error> {
             .transpose()?
             .unwrap_or_default(),
     })
+}
+
+/// 一页结果里的 `totalCount`（一共几条）。AFFiNE 0.27.5-beta.3 的评论在最后一页也说 `hasNextPage: true`
+/// （2026-11-26 看到的：一篇 2 条评论，取 100 条，回来 2 条、`hasNextPage` 还是 `true`），有 `totalCount` 时按它判断
+/// 还有没有下一页，省一次往返。
+fn total_count(conn: &Value) -> Option<usize> {
+    conn.get("totalCount")
+        .and_then(Value::as_u64)
+        .and_then(|t| usize::try_from(t).ok())
 }
 
 fn page<T>(conn: &Value, item: impl Fn(&Value) -> Result<T, Error>) -> Result<Page<T>, Error> {

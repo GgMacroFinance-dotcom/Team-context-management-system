@@ -43,6 +43,9 @@ struct Memory {
     comment_count: usize,
     /// 模拟标成已解决时出错。
     fail_resolve: bool,
+    /// 一次取几篇的评论问了几次；模拟一次取几篇时出错。
+    batches: usize,
+    fail_batch: bool,
 }
 
 impl Memory {
@@ -224,6 +227,21 @@ impl Affine for Memory {
         }
         self.comment_mut(id)?.resolved = true;
         Ok(())
+    }
+
+    async fn comments_of(
+        &mut self,
+        _ws: &str,
+        docs: &[String],
+    ) -> Result<HashMap<String, Vec<Comment>>, ClientError> {
+        self.batches += 1;
+        if self.fail_batch {
+            return Err(ClientError::Protocol("一次取几篇时假的出错".to_owned()));
+        }
+        Ok(docs
+            .iter()
+            .map(|d| (d.clone(), self.comments.get(d).cloned().unwrap_or_default()))
+            .collect())
     }
 }
 
@@ -1054,6 +1072,42 @@ async fn comment_outcomes_are_said_once() {
     let row = f.store.affine_comment(&id).await.unwrap().unwrap();
     assert!(row.closed);
     assert_eq!(row.replies, json!([]));
+}
+
+/// 发过的评论一次取齐；一次取出错时一篇一篇取，照样处理。
+#[tokio::test]
+async fn comments_fall_back_one_by_one() {
+    let Some((f, mut affine)) = linked().await else {
+        return;
+    };
+    let macro_doc = affine.page_id("数据源");
+    let who = agent(&f.store).await;
+    let id = proposal(&f, &who, Action::Update, Some(B), "PMI", "只用统计局的").await;
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert_eq!(r.posted, std::slice::from_ref(&id));
+    // 刚发的评论还没取过：没有发过、还没关的，不用问。
+    assert_eq!(affine.batches, 0);
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert!(r.is_empty(), "{r:?}");
+    assert_eq!(affine.batches, 1);
+
+    tcms_write::reject(&f.store, &id, "cli", None)
+        .await
+        .unwrap();
+    affine.fail_batch = true;
+    let r = sync_comments(&f.store, &mut affine, WS, None)
+        .await
+        .unwrap();
+    assert_eq!(affine.batches, 2);
+    assert_eq!(r.closed, std::slice::from_ref(&id), "{r:?}");
+    assert!(r.errors.is_empty(), "{r:?}");
+    let (_, replies, resolved) = affine.comment_on(&macro_doc);
+    assert_eq!(replies, ["已拒绝（cli）。"]);
+    assert!(resolved);
 }
 
 /// AFFiNE 0.27.5 网页版的客户端 id 超过 32 位（2026-11-24 在网页编辑器里打字，看到的是 50 位的）。

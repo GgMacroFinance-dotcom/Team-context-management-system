@@ -243,6 +243,15 @@ async fn sync_with_a_real_affine() {
         .await
         .unwrap();
     let listed = client.comments(&ws, doc_id).await.unwrap();
+    // 一次问几篇：超过一次查询的篇数（分两次问），没有的文档是空的。
+    let mut many: Vec<String> = (0..affine_sync_client::DOCS_PER_QUERY)
+        .map(|i| format!("no-such-doc-{i}"))
+        .collect();
+    many.push(doc_id.to_owned());
+    let of = client.comments_of(&ws, &many).await.unwrap();
+    assert_eq!(of.len(), many.len());
+    assert_eq!(of[doc_id], listed);
+    assert!(of["no-such-doc-0"].is_empty());
     let found = listed.iter().find(|x| x.id == c.id).unwrap();
     assert_eq!(
         comment_text(&found.content),
