@@ -84,6 +84,9 @@ pub struct AffineDoc {
     pub paused: Option<String>,
     /// 上次同步的时间（RFC 3339）。存的时候不用填。
     pub synced_at: String,
+    /// 上次全部看一遍、两边都没变时 AFFiNE 说这篇最后改的时间（毫秒，AFFiNE 的钟），下次一样就不取。
+    /// 存的时候不用填：存这篇同步的结果时清掉，用 [`Store::set_affine_ts`] 记。
+    pub affine_ts: Option<i64>,
 }
 
 /// 一条的对应关系和底稿。
@@ -176,6 +179,7 @@ fn doc_of(r: &sqlx::postgres::PgRow) -> Result<AffineDoc> {
         synced_commit: r.try_get("synced_commit")?,
         paused: r.try_get("paused")?,
         synced_at: r.try_get("synced_at")?,
+        affine_ts: r.try_get("affine_ts")?,
     })
 }
 
@@ -218,7 +222,7 @@ impl Store {
     /// 接上的文件，按路径排（不带 Yjs 状态）。
     pub async fn affine_docs(&self) -> Result<Vec<AffineDoc>> {
         let rows = sqlx::query(
-            "SELECT path, scope, workspace_id, doc_id, git_blob, synced_commit, paused, \
+            "SELECT path, scope, workspace_id, doc_id, git_blob, synced_commit, paused, affine_ts, \
                     to_char(synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS synced_at \
              FROM affine_docs ORDER BY path",
         )
@@ -310,7 +314,8 @@ impl Store {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
              ON CONFLICT (path) DO UPDATE SET scope = EXCLUDED.scope, workspace_id = EXCLUDED.workspace_id, \
                  doc_id = EXCLUDED.doc_id, state = EXCLUDED.state, git_blob = EXCLUDED.git_blob, \
-                 synced_commit = EXCLUDED.synced_commit, paused = EXCLUDED.paused, synced_at = now()",
+                 synced_commit = EXCLUDED.synced_commit, paused = EXCLUDED.paused, synced_at = now(), \
+                 affine_ts = NULL",
         )
         .bind(&d.path)
         .bind(&d.scope)
@@ -377,9 +382,26 @@ impl Store {
         Ok(())
     }
 
+    /// 记下全部看一遍时两边都没变的文档在 AFFiNE 里最后改的时间（路径、毫秒），见 [`AffineDoc::affine_ts`]。
+    pub async fn set_affine_ts(&self, stamps: &[(String, i64)]) -> Result<()> {
+        if stamps.is_empty() {
+            return Ok(());
+        }
+        let (paths, ts): (Vec<String>, Vec<i64>) = stamps.iter().cloned().unzip();
+        sqlx::query(
+            "UPDATE affine_docs SET affine_ts = v.ts \
+             FROM unnest($1::text[], $2::bigint[]) AS v(path, ts) WHERE affine_docs.path = v.path",
+        )
+        .bind(&paths)
+        .bind(&ts)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// 停下（或接着同步）一篇文档。
     pub async fn set_affine_paused(&self, path: &str, reason: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE affine_docs SET paused = $2 WHERE path = $1")
+        sqlx::query("UPDATE affine_docs SET paused = $2, affine_ts = NULL WHERE path = $1")
             .bind(path)
             .bind(reason)
             .execute(&self.pool)
@@ -423,7 +445,7 @@ impl Store {
             return Ok(false);
         };
         // 下次同步时这篇文档不能因为“两边都没变”跳过。
-        sqlx::query("UPDATE affine_docs SET git_blob = NULL WHERE path = $1")
+        sqlx::query("UPDATE affine_docs SET git_blob = NULL, affine_ts = NULL WHERE path = $1")
             .bind(&path)
             .execute(&mut *tx)
             .await?;

@@ -222,6 +222,41 @@ async fn sync_with_a_real_affine() {
         .apply_update(Update::decode_v1(&missing).unwrap())
         .unwrap();
     assert_eq!(check.transact().state_vector(), StateVector::default());
+
+    // 两边都没变时记下了 AFFiNE 说这篇最后改的时间，再看一遍时一样（7.11）。
+    let ts = store.affine_docs().await.unwrap()[0].affine_ts;
+    let stamps = server.doc_timestamps(&ws).await.unwrap().unwrap();
+    assert!(
+        ts.is_some() && ts == stamps.get(&doc_id).copied(),
+        "{ts:?} {stamps:?}"
+    );
+    let r = sync(&cx, &mut server, &[]).await.unwrap();
+    assert_eq!(r.docs[0].state, "unchanged", "{r:?}");
+    // 人再改一次：AFFiNE 说的时间变了，全部看一遍时照样取到。
+    let sv = page.transact().state_vector();
+    tcms_affine::update_item(
+        &page,
+        &got[1].0,
+        "PMI",
+        &to_blocks("PMI 只用财新的。"),
+        &mut RandomIds,
+    )
+    .unwrap();
+    let delta = page.transact().encode_state_as_update_v1(&sv);
+    human
+        .push_update(&ws, &doc_id, &delta, Intent::Update)
+        .await
+        .unwrap();
+    let stamps = server.doc_timestamps(&ws).await.unwrap().unwrap();
+    assert_ne!(ts, stamps.get(&doc_id).copied());
+    let r = sync(&cx, &mut server, &[]).await.unwrap();
+    assert_eq!(
+        (r.docs[0].state, r.docs[0].to_git.updated),
+        ("synced", 1),
+        "{r:?}"
+    );
+    let file = std::fs::read_to_string(dir.path().join(PATH)).unwrap();
+    assert!(file.contains("PMI 只用财新的。"), "{file}");
     store.drop_schema().await.unwrap();
 }
 

@@ -46,6 +46,15 @@ pub trait Affine {
     /// 一篇文档上的评论，带回复（提议显示成评论，[`crate::comments`]）。
     async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError>;
 
+    /// 工作区里每篇文档在 AFFiNE 里最后改的时间（毫秒，AFFiNE 的钟）。全部看一遍时只取变了的（`docs/affine-sync.md` 7.11）；
+    /// 默认是 `None`，每篇都取。
+    async fn doc_timestamps(
+        &mut self,
+        _workspace: &str,
+    ) -> Result<Option<HashMap<String, i64>>, ClientError> {
+        Ok(None)
+    }
+
     /// 几篇文档上的评论，按文档 id，每篇都在结果里。默认一篇一篇问；连真 AFFiNE 时一次问几篇。
     async fn comments_of(
         &mut self,
@@ -187,6 +196,19 @@ impl Affine for Server {
 
     async fn comments(&mut self, workspace: &str, doc: &str) -> Result<Vec<Comment>, ClientError> {
         self.client.comments(workspace, doc).await
+    }
+
+    async fn doc_timestamps(
+        &mut self,
+        workspace: &str,
+    ) -> Result<Option<HashMap<String, i64>>, ClientError> {
+        Ok(Some(
+            self.conn
+                .doc_timestamps(workspace, None)
+                .await?
+                .into_iter()
+                .collect(),
+        ))
     }
 
     async fn comments_of(
